@@ -34,17 +34,21 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 #include "common/statusor.h"
 #include "gen_cpp/Types_types.h" // TNetworkAddress
+#include "runtime/exec_env.h"
 #include "service/brpc.h"
 #include "util/internal_service_recoverable_stub.h"
 #include "util/lake_service_recoverable_stub.h"
 #include "util/network_util.h"
 #include "util/spinlock.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
@@ -56,14 +60,19 @@ public:
     std::shared_ptr<PInternalService_RecoverableStub> get_stub(const butil::EndPoint& endpoint);
     std::shared_ptr<PInternalService_RecoverableStub> get_stub(const TNetworkAddress& taddr);
     std::shared_ptr<PInternalService_RecoverableStub> get_stub(const std::string& host, int port);
+    void check_and_cleanup_expired_stubs(int32_t timeout_ms);
 
 private:
     struct StubPool {
         StubPool();
+        ~StubPool();
+
         std::shared_ptr<PInternalService_RecoverableStub> get_or_create(const butil::EndPoint& endpoint);
+        bool is_expired(int32_t timeout_ms);
 
         std::vector<std::shared_ptr<PInternalService_RecoverableStub>> _stubs;
         int64_t _idx;
+        std::chrono::steady_clock::time_point _last_access_time;
     };
 
     SpinLock _lock;
@@ -74,6 +83,7 @@ class HttpBrpcStubCache {
 public:
     static HttpBrpcStubCache* getInstance();
     StatusOr<std::shared_ptr<PInternalService_RecoverableStub>> get_http_stub(const TNetworkAddress& taddr);
+    void check_and_cleanup_expired_stubs(int32_t timeout_ms);
 
 private:
     HttpBrpcStubCache();
@@ -82,12 +92,14 @@ private:
 
     SpinLock _lock;
     butil::FlatMap<butil::EndPoint, std::shared_ptr<PInternalService_RecoverableStub>> _stub_map;
+    butil::FlatMap<butil::EndPoint, std::chrono::steady_clock::time_point> _last_access_time_map;
 };
 
 class LakeServiceBrpcStubCache {
 public:
     static LakeServiceBrpcStubCache* getInstance();
     StatusOr<std::shared_ptr<starrocks::LakeService_RecoverableStub>> get_stub(const std::string& host, int port);
+    void check_and_cleanup_expired_stubs(int32_t timeout_ms);
 
 private:
     LakeServiceBrpcStubCache();
@@ -96,6 +108,18 @@ private:
 
     SpinLock _lock;
     butil::FlatMap<butil::EndPoint, std::shared_ptr<LakeService_RecoverableStub>> _stub_map;
+    butil::FlatMap<butil::EndPoint, std::chrono::steady_clock::time_point> _last_access_time_map;
+};
+
+class BrpcStubManager {
+public:
+    BrpcStubManager(ExecEnv* exec_env);
+    ~BrpcStubManager();
+
+private:
+    ExecEnv* _exec_env;
+    std::atomic<bool> _is_stopped = false;
+    std::thread _cleanup_thread;
 };
 
 } // namespace starrocks
