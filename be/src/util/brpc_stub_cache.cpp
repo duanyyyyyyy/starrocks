@@ -17,6 +17,7 @@
 #include "common/config.h"
 #include "gen_cpp/internal_service.pb.h"
 #include "gen_cpp/lake_service.pb.h"
+#include "runtime/exec_env.h"
 #include "util/failpoint/fail_point.h"
 #include "util/misc.h"
 #include "util/starrocks_metrics.h"
@@ -264,10 +265,12 @@ BrpcStubManager::BrpcStubManager(ExecEnv* exec_env) : _exec_env(exec_env) {
 #endif
         while (!_is_stopped.load()) {
             LOG(INFO) << "Start to clean up expired brpc stubs";
-            _exec_env->brpc_stub_cache()->check_and_cleanup_expired_stubs(config::brpc_stub_expire_ms);
-            HttpBrpcStubCache::getInstance()->check_and_cleanup_expired_stubs(config::brpc_stub_expire_ms);
-            LakeServiceBrpcStubCache::getInstance()->check_and_cleanup_expired_stubs(config::brpc_stub_expire_ms);
-            nap_sleep(config::brpc_stub_cleanup_interval_s, [this] { return _is_stopped.load(); });
+            int64_t stub_expire_ms = config::brpc_stub_expire_ms;
+            int64_t cleanup_interval_s = config::brpc_stub_cleanup_interval_s;
+            _exec_env->brpc_stub_cache()->check_and_cleanup_expired_stubs(stub_expire_ms);
+            HttpBrpcStubCache::getInstance()->check_and_cleanup_expired_stubs(stub_expire_ms);
+            LakeServiceBrpcStubCache::getInstance()->check_and_cleanup_expired_stubs(stub_expire_ms);
+            nap_sleep(cleanup_interval_s, [this] { return _is_stopped.load(); });
         }
     });
     Thread::set_thread_name(_cleanup_thread, "brpc_cleanup_thread");

@@ -42,7 +42,6 @@
 
 #include "common/statusor.h"
 #include "gen_cpp/Types_types.h" // TNetworkAddress
-#include "runtime/exec_env.h"
 #include "service/brpc.h"
 #include "util/internal_service_recoverable_stub.h"
 #include "util/lake_service_recoverable_stub.h"
@@ -51,6 +50,8 @@
 #include "util/thread.h"
 
 namespace starrocks {
+
+class ExecEnv;
 
 class BrpcStubCache {
 public:
