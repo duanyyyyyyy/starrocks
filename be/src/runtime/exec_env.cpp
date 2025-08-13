@@ -739,8 +739,8 @@ void ExecEnv::destroy() {
     SAFE_DELETE(_broker_mgr);
     SAFE_DELETE(_bfd_parser);
     SAFE_DELETE(_load_path_mgr);
-    SAFE_DELETE(_brpc_stub_cache);
     SAFE_DELETE(_brpc_stub_manager);
+    SAFE_DELETE(_brpc_stub_cache);
     SAFE_DELETE(_udf_call_pool);
     SAFE_DELETE(_pipeline_prepare_pool);
     SAFE_DELETE(_pipeline_sink_io_pool);
