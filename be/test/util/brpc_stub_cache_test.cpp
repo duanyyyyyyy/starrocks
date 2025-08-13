@@ -131,7 +131,7 @@ TEST_F(BrpcStubCacheTest, http_stub_cleanup) {
     auto stub1 = cache.get_http_stub(address);
     ASSERT_NE(nullptr, *stub1);
     auto stub2 = cache.get_http_stub(address);
-    ASSERT_NE(*stub1, *stub2);
+    ASSERT_EQ(*stub1, *stub2);
     cache.check_and_cleanup_expired_stubs(0);
 
     auto stub3 = cache.get_http_stub(address);
