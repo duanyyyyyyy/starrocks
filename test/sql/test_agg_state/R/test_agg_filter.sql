@@ -57,11 +57,11 @@ group by id
 order by id;
 -- result:
 100.00000000	0	None	None	None	["A"]	["A"]	["A"]	1	0	None
-None	1	150.00	150.00	None	[null]	[null]	[null]	1	0	None
+None	1	150.00	150.00	None	None	None	None	1	0	None
 200.00000000	0	None	200.00	None	["A"]	["A"]	["A"]	1	0	None
-None	1	250.00	250.00	None	[null]	[null]	[null]	1	0	None
-None	1	None	300.00	300.00	[null]	[null]	[null]	1	1	None
-None	1	None	500.00	None	[null]	[null]	[null]	1	1	500.00
+None	1	250.00	250.00	None	None	None	None	1	0	None
+None	1	None	300.00	300.00	None	None	None	1	1	None
+None	1	None	500.00	None	None	None	None	1	1	500.00
 -- !result
 set sql_dialect='Trino';
 -- result:
@@ -82,11 +82,11 @@ group by id
 order by id;
 -- result:
 100.00000000	0	None	None	None	["A"]	["A"]	1	0	None
-None	1	150.00	150.00	None	[null]	[null]	1	0	None
-200.00000000	0	None	200.00	None	["A"]	["A"]	1	0	None
-None	1	250.00	250.00	None	[null]	[null]	1	0	None
-None	1	None	300.00	300.00	[null]	[null]	1	1	None
-None	1	None	500.00	None	[null]	[null]	1	1	500.00
+None	1	150.00	150.00	None	None	None	1	0	None
+200.00000000	0	None	200.00	None	None	None	1	0	None
+None	1	250.00	250.00	None	None	None	1	0	None
+None	1	None	300.00	300.00	None	None	1	1	None
+None	1	None	500.00	None	None	None	1	1	500.00
 -- !result
 set sql_dialect='StarRocks';
 -- result:
@@ -108,11 +108,11 @@ group by id
 order by id;
 -- result:
 100.00000000	0	None	None	None	["A"]	["A"]	["A"]	1	0	None
-None	1	150.00	150.00	None	[null]	[null]	[null]	1	0	None
+None	1	150.00	150.00	None	None	None	None	1	0	None
 200.00000000	0	None	200.00	None	["A"]	["A"]	["A"]	1	0	None
-None	1	250.00	250.00	None	[null]	[null]	[null]	1	0	None
-None	1	None	300.00	300.00	[null]	[null]	[null]	1	1	None
-None	1	None	500.00	None	[null]	[null]	[null]	1	1	500.00
+None	1	250.00	250.00	None	None	None	None	1	0	None
+None	1	None	300.00	300.00	None	None	None	1	1	None
+None	1	None	500.00	None	None	None	None	1	1	500.00
 -- !result
 drop table sales;
 -- result:
