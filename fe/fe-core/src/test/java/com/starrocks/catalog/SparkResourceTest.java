@@ -226,6 +226,147 @@ public class SparkResourceTest {
     }
 
     @Test
+    public void testLivyMode(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
+            throws StarRocksException {
+        new Expectations() {
+            {
+                globalStateMgr.getBrokerMgr();
+                result = brokerMgr;
+                brokerMgr.containsBroker(broker);
+                result = true;
+            }
+        };
+
+        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
+        new Expectations() {
+            {
+                globalStateMgr.getAnalyzer();
+                result = analyzer;
+            }
+        };
+
+        // Livy mode: yarn master with livy.url, no YARN RM address required
+        properties.put("spark.master", "yarn");
+        properties.put("spark.submit.deployMode", "cluster");
+        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        properties.put("livy.url", "http://livy-server:8998");
+        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
+        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
+        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
+        Assertions.assertTrue(resource.isYarnMaster());
+        Assertions.assertTrue(resource.isLivyMode());
+        Assertions.assertEquals("http://livy-server:8998", resource.getLivyUrl());
+
+        // test getCopiedResource preserves livyUrl
+        SparkResource copied = resource.getCopiedResource();
+        Assertions.assertTrue(copied.isLivyMode());
+        Assertions.assertEquals("http://livy-server:8998", copied.getLivyUrl());
+
+        // test getProcNodeData includes livy.url
+        BaseProcResult result = new BaseProcResult();
+        resource.getProcNodeData(result);
+        boolean hasLivyUrl = result.getRows().stream()
+                .anyMatch(row -> row.get(2).equals("livy.url"));
+        Assertions.assertTrue(hasLivyUrl);
+    }
+
+    @Test
+    public void testLivyBasicAuth(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
+            throws StarRocksException {
+        new Expectations() {
+            {
+                globalStateMgr.getBrokerMgr();
+                result = brokerMgr;
+                brokerMgr.containsBroker(broker);
+                result = true;
+            }
+        };
+
+        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
+        new Expectations() {
+            {
+                globalStateMgr.getAnalyzer();
+                result = analyzer;
+            }
+        };
+
+        properties.put("spark.master", "yarn");
+        properties.put("spark.submit.deployMode", "cluster");
+        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        properties.put("livy.url", "http://livy-server:8998");
+        properties.put("livy.username", "admin");
+        properties.put("livy.password", "secret");
+        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
+        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
+        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
+        Assertions.assertTrue(resource.isLivyMode());
+        Assertions.assertEquals("admin", resource.getLivyUsername());
+        Assertions.assertEquals("secret", resource.getLivyPassword());
+
+        // test getCopiedResource preserves auth
+        SparkResource copied = resource.getCopiedResource();
+        Assertions.assertEquals("admin", copied.getLivyUsername());
+        Assertions.assertEquals("secret", copied.getLivyPassword());
+
+        // test update auth
+        SparkResource copied2 = resource.getCopiedResource();
+        Map<String, String> updateProps = Maps.newHashMap();
+        updateProps.put("livy.username", "newuser");
+        updateProps.put("livy.password", "newpass");
+        ResourceDesc desc = new ResourceDesc(name, updateProps);
+        copied2.update(desc);
+        Assertions.assertEquals("newuser", copied2.getLivyUsername());
+        Assertions.assertEquals("newpass", copied2.getLivyPassword());
+    }
+
+    @Test
+    public void testNonLivyMode() {
+        SparkResource resource = new SparkResource("spark_non_livy");
+        Assertions.assertFalse(resource.isLivyMode());
+        Assertions.assertNull(resource.getLivyUrl());
+    }
+
+    @Test
+    public void testLivyModeUpdate(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
+            throws StarRocksException {
+        new Expectations() {
+            {
+                globalStateMgr.getBrokerMgr();
+                result = brokerMgr;
+                brokerMgr.containsBroker(broker);
+                result = true;
+            }
+        };
+
+        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
+        new Expectations() {
+            {
+                globalStateMgr.getAnalyzer();
+                result = analyzer;
+            }
+        };
+
+        // create without livy
+        properties.put("spark.master", "yarn");
+        properties.put("spark.submit.deployMode", "cluster");
+        properties.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
+        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
+        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
+        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
+        Assertions.assertFalse(resource.isLivyMode());
+
+        // update with livy.url
+        SparkResource copied = resource.getCopiedResource();
+        Map<String, String> updateProps = Maps.newHashMap();
+        updateProps.put("livy.url", "http://livy:8998");
+        ResourceDesc desc = new ResourceDesc(name, updateProps);
+        copied.update(desc);
+        Assertions.assertTrue(copied.isLivyMode());
+        Assertions.assertEquals("http://livy:8998", copied.getLivyUrl());
+    }
+
+    @Test
     public void testNoBroker(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr) {
         assertThrows(DdlException.class, () -> {
             new Expectations() {

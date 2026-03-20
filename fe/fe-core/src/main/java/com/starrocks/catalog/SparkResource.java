@@ -35,6 +35,7 @@
 package com.starrocks.catalog;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
@@ -103,6 +104,9 @@ public class SparkResource extends Resource {
     private static final String BROKER = "broker";
     private static final String YARN_MASTER = "yarn";
     private static final String SPARK_CONFIG_PREFIX = "spark.";
+    private static final String LIVY_URL = "livy.url";
+    private static final String LIVY_USERNAME = "livy.username";
+    private static final String LIVY_PASSWORD = "livy.password";
     private static final String BROKER_PROPERTY_PREFIX = "broker.";
     // spark uses hadoop configs in the form of spark.hadoop.*
     private static final String SPARK_HADOOP_CONFIG_PREFIX = "spark.hadoop.";
@@ -140,6 +144,12 @@ public class SparkResource extends Resource {
     private Map<String, String> brokerProperties;
     @SerializedName(value = "hasBroker")
     private boolean hasBroker;
+    @SerializedName(value = "livyUrl")
+    private String livyUrl;
+    @SerializedName(value = "livyUsername")
+    private String livyUsername;
+    @SerializedName(value = "livyPassword")
+    private String livyPassword;
 
     public SparkResource(String name) {
         this(name, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
@@ -195,7 +205,12 @@ public class SparkResource extends Resource {
     }
 
     public SparkResource getCopiedResource() {
-        return new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker, brokerProperties, hasBroker);
+        SparkResource copied = new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker,
+                brokerProperties, hasBroker);
+        copied.livyUrl = this.livyUrl;
+        copied.livyUsername = this.livyUsername;
+        copied.livyPassword = this.livyPassword;
+        return copied;
     }
 
     // Each SparkResource has and only has one SparkRepository.
@@ -244,6 +259,22 @@ public class SparkResource extends Resource {
         return getMaster().equalsIgnoreCase(YARN_MASTER);
     }
 
+    public boolean isLivyMode() {
+        return !Strings.isNullOrEmpty(livyUrl);
+    }
+
+    public String getLivyUrl() {
+        return livyUrl;
+    }
+
+    public String getLivyUsername() {
+        return livyUsername;
+    }
+
+    public String getLivyPassword() {
+        return livyPassword;
+    }
+
     public void update(ResourceDesc resourceDesc) throws DdlException {
         Preconditions.checkState(name.equals(resourceDesc.getName()));
 
@@ -267,6 +298,16 @@ public class SparkResource extends Resource {
             hasBroker = true;
         }
         brokerProperties.putAll(getBrokerProperties(properties));
+
+        if (properties.containsKey(LIVY_URL)) {
+            livyUrl = properties.get(LIVY_URL);
+        }
+        if (properties.containsKey(LIVY_USERNAME)) {
+            livyUsername = properties.get(LIVY_USERNAME);
+        }
+        if (properties.containsKey(LIVY_PASSWORD)) {
+            livyPassword = properties.get(LIVY_PASSWORD);
+        }
     }
 
     @Override
@@ -289,37 +330,44 @@ public class SparkResource extends Resource {
             throw new DdlException("Missing " + SPARK_SUBMIT_DEPLOY_MODE + " in properties");
         }
 
+        // parse livy url and auth
+        livyUrl = properties.get(LIVY_URL);
+        livyUsername = properties.get(LIVY_USERNAME);
+        livyPassword = properties.get(LIVY_PASSWORD);
+
         // if deploy machines do not set HADOOP_CONF_DIR env, we should set these configs blow
+        // In Livy mode, YARN resource manager address is not required on FE side
         if (isYarnMaster()) {
             // spark.hadoop.fs.defaultFS must be set
             if (!sparkConfigs.containsKey(SPARK_FS_DEFAULT_FS)) {
                 throw new DdlException("Missing " + SPARK_FS_DEFAULT_FS + " in yarn master");
             }
 
-            // check yarn resource manager
-            String resourceManagerHaEnabled = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_ENABLED);
-            if (sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_ADDRESS)) {
-                // standalone yarn resource manager
-            } else if (resourceManagerHaEnabled != null && resourceManagerHaEnabled.equalsIgnoreCase("true")) {
-                // yarn resource manager high availability
-                // spark.hadoop.yarn.resourcemanager.ha.rm-ids must be set
-                if (!sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS)) {
-                    throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS + " in yarn master");
-                }
-
-                // spark.hadoop.yarn.resourcemanager.hostname.rm-id or
-                // spark.hadoop.yarn.resourcemanager.address.rm-id must be set
-                String[] haRmIds = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS).split(",");
-                for (String haRmId : haRmIds) {
-                    String addressKey = String.format(YARN_RESOURCE_MANAGER_ADDRESS_FOMART, haRmId);
-                    String hostnameKey = String.format(YARN_RESOURCE_MANAGER_HOSTNAME_FORMAT, haRmId);
-                    if (!sparkConfigs.containsKey(addressKey) && !sparkConfigs.containsKey(hostnameKey)) {
-                        throw new DdlException("Missing " + addressKey + " or " + hostnameKey + " in yarn master");
+            if (!isLivyMode()) {
+                // check yarn resource manager (only required in non-Livy mode)
+                String resourceManagerHaEnabled = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_ENABLED);
+                if (sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_ADDRESS)) {
+                    // standalone yarn resource manager
+                } else if (resourceManagerHaEnabled != null && resourceManagerHaEnabled.equalsIgnoreCase("true")) {
+                    // yarn resource manager high availability
+                    if (!sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS)) {
+                        throw new DdlException(
+                                "Missing " + SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS + " in yarn master");
                     }
+
+                    String[] haRmIds = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS).split(",");
+                    for (String haRmId : haRmIds) {
+                        String addressKey = String.format(YARN_RESOURCE_MANAGER_ADDRESS_FOMART, haRmId);
+                        String hostnameKey = String.format(YARN_RESOURCE_MANAGER_HOSTNAME_FORMAT, haRmId);
+                        if (!sparkConfigs.containsKey(addressKey) && !sparkConfigs.containsKey(hostnameKey)) {
+                            throw new DdlException(
+                                    "Missing " + addressKey + " or " + hostnameKey + " in yarn master");
+                        }
+                    }
+                } else {
+                    throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_ADDRESS +
+                            " or resource manager HA configs in yarn master");
                 }
-            } else {
-                throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_ADDRESS +
-                        " or resource manager HA configs in yarn master");
             }
         }
 
@@ -382,6 +430,9 @@ public class SparkResource extends Resource {
         }
         if (broker != null) {
             result.addRow(Lists.newArrayList(name, lowerCaseType, SparkResource.BROKER, broker));
+        }
+        if (livyUrl != null) {
+            result.addRow(Lists.newArrayList(name, lowerCaseType, SparkResource.LIVY_URL, livyUrl));
         }
         for (Map.Entry<String, String> entry : brokerProperties.entrySet()) {
             result.addRow(Lists.newArrayList(name, lowerCaseType, entry.getKey(), entry.getValue()));
