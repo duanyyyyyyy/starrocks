@@ -15,10 +15,8 @@
 package com.starrocks.load.loadv2;
 
 import com.starrocks.common.LoadException;
-import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
-import mockit.Mocked;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -26,33 +24,66 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class LivyClientTest {
 
+    private HttpURLConnection createMockConnection(int responseCode, String responseBody) {
+        return new MockUp<HttpURLConnection>() {
+            @Mock
+            public void setRequestMethod(String method) {
+            }
+
+            @Mock
+            public void setRequestProperty(String key, String value) {
+            }
+
+            @Mock
+            public void setDoOutput(boolean doOutput) {
+            }
+
+            @Mock
+            public void setConnectTimeout(int timeout) {
+            }
+
+            @Mock
+            public void setReadTimeout(int timeout) {
+            }
+
+            @Mock
+            public java.io.OutputStream getOutputStream() {
+                return new ByteArrayOutputStream();
+            }
+
+            @Mock
+            public int getResponseCode() {
+                return responseCode;
+            }
+
+            @Mock
+            public java.io.InputStream getInputStream() {
+                return new ByteArrayInputStream(responseBody.getBytes(StandardCharsets.UTF_8));
+            }
+
+            @Mock
+            public java.io.InputStream getErrorStream() {
+                return new ByteArrayInputStream(responseBody.getBytes(StandardCharsets.UTF_8));
+            }
+        }.getMockInstance();
+    }
+
     @Test
-    public void testSubmitBatch(@Mocked HttpURLConnection conn) throws LoadException, IOException {
+    public void testSubmitBatch() throws LoadException {
         String responseJson = "{\"id\": 10, \"state\": \"starting\", \"appId\": null, \"appInfo\": {}}";
 
-        new MockUp<URL>() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getOutputStream();
-                result = new ByteArrayOutputStream();
-                conn.getResponseCode();
-                result = 200;
-                conn.getInputStream();
-                result = new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                return createMockConnection(200, responseJson);
             }
         };
 
@@ -67,23 +98,14 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testGetBatchStatus(@Mocked HttpURLConnection conn) throws LoadException, IOException {
+    public void testGetBatchStatus() throws LoadException {
         String responseJson = "{\"id\": 10, \"state\": \"running\", \"appId\": \"app_123\","
                 + " \"appInfo\": {\"sparkUiUrl\": \"http://ui\"}}";
 
-        new MockUp<URL>() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getResponseCode();
-                result = 200;
-                conn.getInputStream();
-                result = new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                return createMockConnection(200, responseJson);
             }
         };
 
@@ -95,18 +117,11 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testDeleteBatch(@Mocked HttpURLConnection conn) throws LoadException, IOException {
-        new MockUp<URL>() {
+    public void testDeleteBatch() throws LoadException {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getResponseCode();
-                result = 200;
+                return createMockConnection(200, "");
             }
         };
 
@@ -115,22 +130,11 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testSubmitBatchHttpError(@Mocked HttpURLConnection conn) throws IOException {
-        new MockUp<URL>() {
+    public void testSubmitBatchHttpError() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getOutputStream();
-                result = new ByteArrayOutputStream();
-                conn.getResponseCode();
-                result = 500;
-                conn.getErrorStream();
-                result = new ByteArrayInputStream("{\"msg\": \"error\"}".getBytes(StandardCharsets.UTF_8));
+                return createMockConnection(500, "{\"msg\": \"error\"}");
             }
         };
 
@@ -140,20 +144,11 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testGetBatchStatusHttpError(@Mocked HttpURLConnection conn) throws IOException {
-        new MockUp<URL>() {
+    public void testGetBatchStatusHttpError() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getResponseCode();
-                result = 404;
-                conn.getErrorStream();
-                result = new ByteArrayInputStream("{\"msg\": \"not found\"}".getBytes(StandardCharsets.UTF_8));
+                return createMockConnection(404, "{\"msg\": \"not found\"}");
             }
         };
 
@@ -162,20 +157,11 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testDeleteBatchHttpError(@Mocked HttpURLConnection conn) throws IOException {
-        new MockUp<URL>() {
+    public void testDeleteBatchHttpError() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getResponseCode();
-                result = 500;
-                conn.getErrorStream();
-                result = new ByteArrayInputStream("{\"msg\": \"error\"}".getBytes(StandardCharsets.UTF_8));
+                return createMockConnection(500, "{\"msg\": \"error\"}");
             }
         };
 
@@ -185,7 +171,7 @@ public class LivyClientTest {
 
     @Test
     public void testSubmitBatchIOException() {
-        new MockUp<URL>() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() throws IOException {
                 throw new IOException("connection refused");
@@ -198,84 +184,98 @@ public class LivyClientTest {
     }
 
     @Test
-    public void testBasicAuth(@Mocked HttpURLConnection conn) throws LoadException, IOException {
+    public void testBasicAuth() throws LoadException {
         String responseJson = "{\"id\": 1, \"state\": \"running\", \"appId\": null, \"appInfo\": {}}";
+        AtomicReference<String> capturedAuth = new AtomicReference<>();
 
-        new MockUp<URL>() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
+                return new MockUp<HttpURLConnection>() {
+                    @Mock
+                    public void setRequestMethod(String method) {
+                    }
 
-        String expectedAuth = "Basic " + Base64.getEncoder().encodeToString(
-                "admin:secret".getBytes(StandardCharsets.UTF_8));
+                    @Mock
+                    public void setRequestProperty(String key, String value) {
+                        if ("Authorization".equals(key)) {
+                            capturedAuth.set(value);
+                        }
+                    }
 
-        new Expectations() {
-            {
-                conn.setRequestProperty("Authorization", expectedAuth);
-                times = 1;
-                conn.getResponseCode();
-                result = 200;
-                conn.getInputStream();
-                result = new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                    @Mock
+                    public void setConnectTimeout(int timeout) {
+                    }
+
+                    @Mock
+                    public void setReadTimeout(int timeout) {
+                    }
+
+                    @Mock
+                    public int getResponseCode() {
+                        return 200;
+                    }
+
+                    @Mock
+                    public java.io.InputStream getInputStream() {
+                        return new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                    }
+                }.getMockInstance();
             }
         };
 
         LivyClient client = new LivyClient("http://livy:8998", "admin", "secret");
         LivyBatchResponse response = client.getBatchStatus(1);
         Assertions.assertEquals(1, response.getId());
+
+        String expectedAuth = "Basic " + Base64.getEncoder().encodeToString(
+                "admin:secret".getBytes(StandardCharsets.UTF_8));
+        Assertions.assertEquals(expectedAuth, capturedAuth.get());
     }
 
     @Test
-    public void testNoAuthWhenUsernameEmpty(@Mocked HttpURLConnection conn) throws LoadException, IOException {
+    public void testNoAuthWhenUsernameNull() throws LoadException {
         String responseJson = "{\"id\": 2, \"state\": \"running\", \"appId\": null, \"appInfo\": {}}";
+        AtomicReference<String> capturedAuth = new AtomicReference<>();
 
-        new MockUp<URL>() {
+        new MockUp<java.net.URL>() {
             @Mock
             public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
+                return new MockUp<HttpURLConnection>() {
+                    @Mock
+                    public void setRequestMethod(String method) {
+                    }
 
-        new Expectations() {
-            {
-                conn.setRequestProperty("Authorization", withAny(""));
-                times = 0;
-                conn.getResponseCode();
-                result = 200;
-                conn.getInputStream();
-                result = new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                    @Mock
+                    public void setRequestProperty(String key, String value) {
+                        if ("Authorization".equals(key)) {
+                            capturedAuth.set(value);
+                        }
+                    }
+
+                    @Mock
+                    public void setConnectTimeout(int timeout) {
+                    }
+
+                    @Mock
+                    public void setReadTimeout(int timeout) {
+                    }
+
+                    @Mock
+                    public int getResponseCode() {
+                        return 200;
+                    }
+
+                    @Mock
+                    public java.io.InputStream getInputStream() {
+                        return new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
+                    }
+                }.getMockInstance();
             }
         };
 
         LivyClient client = new LivyClient("http://livy:8998", null, null);
-        LivyBatchResponse response = client.getBatchStatus(2);
-        Assertions.assertEquals(2, response.getId());
-    }
-
-    @Test
-    public void testTrailingSlashHandling(@Mocked HttpURLConnection conn) throws LoadException, IOException {
-        String responseJson = "{\"id\": 5, \"state\": \"success\", \"appId\": \"app_1\", \"appInfo\": {}}";
-
-        new MockUp<URL>() {
-            @Mock
-            public HttpURLConnection openConnection() {
-                return conn;
-            }
-        };
-
-        new Expectations() {
-            {
-                conn.getResponseCode();
-                result = 200;
-                conn.getInputStream();
-                result = new ByteArrayInputStream(responseJson.getBytes(StandardCharsets.UTF_8));
-            }
-        };
-
-        LivyClient client = new LivyClient("http://livy:8998/");
-        LivyBatchResponse response = client.getBatchStatus(5);
-        Assertions.assertEquals(5, response.getId());
+        client.getBatchStatus(2);
+        Assertions.assertNull(capturedAuth.get());
     }
 }

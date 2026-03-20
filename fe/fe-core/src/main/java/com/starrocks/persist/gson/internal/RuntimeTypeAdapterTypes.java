@@ -100,6 +100,7 @@ import com.starrocks.catalog.RecycleUnPartitionInfo;
 import com.starrocks.catalog.Resource;
 import com.starrocks.catalog.ScalarFunction;
 import com.starrocks.catalog.SinglePartitionInfo;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.catalog.SqlFunction;
 import com.starrocks.catalog.StringVariant;
@@ -221,6 +222,7 @@ public class RuntimeTypeAdapterTypes {
         final RuntimeTypeAdapterFactory<Resource> resource_type_adapter_factory = RuntimeTypeAdapterFactory
                 .of(Resource.class, "clazz")
                 .registerSubtype(SparkResource.class, "SparkResource")
+                .registerSubtype(LivyResource.class, "LivyResource")
                 .registerSubtype(HiveResource.class, "HiveResource")
                 .registerSubtype(IcebergResource.class, "IcebergResource")
                 .registerSubtype(HudiResource.class, "HudiResource")

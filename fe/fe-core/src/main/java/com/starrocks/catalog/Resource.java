@@ -49,6 +49,7 @@ public abstract class Resource implements Writable {
     public enum ResourceType {
         UNKNOWN,
         SPARK,
+        SPARK_LIVY,
         HIVE,
         ICEBERG,
         HUDI,
@@ -81,6 +82,9 @@ public abstract class Resource implements Writable {
         switch (type) {
             case SPARK:
                 resource = new SparkResource(stmt.getResourceName());
+                break;
+            case SPARK_LIVY:
+                resource = new LivyResource(stmt.getResourceName());
                 break;
             case HIVE:
                 resource = new HiveResource(stmt.getResourceName());

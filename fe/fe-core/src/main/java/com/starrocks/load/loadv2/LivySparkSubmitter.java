@@ -15,6 +15,7 @@
 package com.starrocks.load.loadv2;
 
 import com.google.common.base.Strings;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.StarRocksException;
@@ -49,7 +50,7 @@ public class LivySparkSubmitter implements SparkSubmitter {
         long loadJobId = param.getLoadJobId();
         String loadLabel = param.getLoadLabel();
         EtlJobConfig etlJobConfig = param.getEtlJobConfig();
-        SparkResource resource = param.getResource();
+        LivyResource resource = (LivyResource) param.getResource();
         BrokerDesc brokerDesc = param.getBrokerDesc();
 
         // 1. prepare archive (reuse existing logic)
@@ -119,6 +120,7 @@ public class LivySparkSubmitter implements SparkSubmitter {
     @Override
     public EtlStatus getStatus(String appId, long loadJobId, String etlOutputPath,
                                 SparkResource resource, BrokerDesc brokerDesc) throws StarRocksException {
+        LivyResource livyResource = (LivyResource) resource;
         EtlStatus status = new EtlStatus();
 
         int batchId;
@@ -130,8 +132,8 @@ public class LivySparkSubmitter implements SparkSubmitter {
             return status;
         }
 
-        LivyClient client = new LivyClient(resource.getLivyUrl(), resource.getLivyUsername(),
-                resource.getLivyPassword());
+        LivyClient client = new LivyClient(livyResource.getLivyUrl(), livyResource.getLivyUsername(),
+                livyResource.getLivyPassword());
         LivyBatchResponse response;
         try {
             response = client.getBatchStatus(batchId);
@@ -164,6 +166,7 @@ public class LivySparkSubmitter implements SparkSubmitter {
 
     @Override
     public void kill(String appId, long loadJobId, SparkResource resource) throws StarRocksException {
+        LivyResource livyResource = (LivyResource) resource;
         int batchId;
         try {
             batchId = Integer.parseInt(appId);
@@ -172,8 +175,8 @@ public class LivySparkSubmitter implements SparkSubmitter {
             return;
         }
 
-        LivyClient client = new LivyClient(resource.getLivyUrl(), resource.getLivyUsername(),
-                resource.getLivyPassword());
+        LivyClient client = new LivyClient(livyResource.getLivyUrl(), livyResource.getLivyUsername(),
+                livyResource.getLivyPassword());
         try {
             client.deleteBatch(batchId);
         } catch (LoadException e) {

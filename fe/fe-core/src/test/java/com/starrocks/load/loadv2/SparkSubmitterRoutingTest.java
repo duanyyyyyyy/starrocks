@@ -15,11 +15,11 @@
 package com.starrocks.load.loadv2;
 
 import com.google.common.collect.Maps;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.common.FeConstants;
 import com.starrocks.load.loadv2.etl.EtlJobConfig;
 import com.starrocks.sql.ast.BrokerDesc;
-import mockit.Expectations;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,13 +44,8 @@ public class SparkSubmitterRoutingTest {
 
     @Test
     public void testCreateLivySubmitter() {
-        SparkResource resource = new SparkResource("spark_livy");
-        new Expectations(resource) {
-            {
-                resource.isLivyMode();
-                result = true;
-            }
-        };
+        LivyResource resource = new LivyResource("spark_livy");
+        Assertions.assertTrue(resource.isLivyMode());
 
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
         SparkSubmitter submitter = handler.createSubmitter(resource);

@@ -35,7 +35,6 @@
 package com.starrocks.catalog;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
@@ -58,30 +57,39 @@ import java.util.Map;
  * working_dir and broker[.xxx] are optional and used in spark ETL.
  * working_dir is used to store ETL intermediate files and broker is used to read the intermediate files by BE.
  * <p>
- * Two submission modes are supported, controlled by "spark.mode":
- * <p>
- * 1. YARN mode (default): submits via spark-submit, requires spark.master, spark.submit.deployMode, YARN RM configs.
- * <p>
+ * Spark resource example:
  * CREATE EXTERNAL RESOURCE "spark0"
  * PROPERTIES
  * (
  * "type" = "spark",
  * "spark.master" = "yarn",
  * "spark.submit.deployMode" = "cluster",
+ * "spark.jars" = "xxx.jar,yyy.jar",
+ * "spark.files" = "/tmp/aaa,/tmp/bbb",
+ * "spark.executor.memory" = "1g",
+ * "spark.yarn.queue" = "queue0",
  * "spark.hadoop.yarn.resourcemanager.address" = "127.0.0.1:9999",
  * "spark.hadoop.fs.defaultFS" = "hdfs://127.0.0.1:10000",
  * "working_dir" = "hdfs://127.0.0.1:10000/tmp/starrocks",
- * "broker" = "broker0"
+ * "broker" = "broker0",
+ * "broker.username" = "user0",
+ * "broker.password" = "password0"
  * );
  * <p>
- * 2. Livy mode: submits via Apache Livy Batch REST API, only requires livy.url.
- * <p>
- * CREATE EXTERNAL RESOURCE "spark_livy"
+ * # yarn resource manager high availability
+ * # "spark.hadoop.yarn.resourcemanager.hostname.rm1" can be replaced
+ * # with "spark.hadoop.yarn.resourcemanager.address.rm1"
+ * CREATE EXTERNAL RESOURCE "spark1"
  * PROPERTIES
  * (
  * "type" = "spark",
- * "spark.mode" = "livy",
- * "livy.url" = "http://livy-server:8998",
+ * "spark.master" = "yarn",
+ * "spark.submit.deployMode" = "cluster",
+ * "spark.hadoop.yarn.resourcemanager.ha.enabled" = "true",
+ * "spark.hadoop.yarn.resourcemanager.ha.rm-ids" = "rm1,rm2",
+ * "spark.hadoop.yarn.resourcemanager.hostname.rm1" = "host1",
+ * "spark.hadoop.yarn.resourcemanager.hostname.rm2" = "host2",
+ * "spark.hadoop.fs.defaultFS" = "hdfs://127.0.0.1:10000",
  * "working_dir" = "hdfs://127.0.0.1:10000/tmp/starrocks",
  * "broker" = "broker0"
  * );
@@ -91,15 +99,11 @@ import java.util.Map;
 public class SparkResource extends Resource {
     private static final String SPARK_MASTER = "spark.master";
     private static final String SPARK_SUBMIT_DEPLOY_MODE = "spark.submit.deployMode";
-    private static final String SPARK_MODE = "spark.mode";
-    private static final String WORKING_DIR = "working_dir";
-    private static final String BROKER = "broker";
+    protected static final String WORKING_DIR = "working_dir";
+    protected static final String BROKER = "broker";
     private static final String YARN_MASTER = "yarn";
-    private static final String SPARK_CONFIG_PREFIX = "spark.";
-    private static final String LIVY_URL = "livy.url";
-    private static final String LIVY_USERNAME = "livy.username";
-    private static final String LIVY_PASSWORD = "livy.password";
-    private static final String BROKER_PROPERTY_PREFIX = "broker.";
+    protected static final String SPARK_CONFIG_PREFIX = "spark.";
+    protected static final String BROKER_PROPERTY_PREFIX = "broker.";
     // spark uses hadoop configs in the form of spark.hadoop.*
     private static final String SPARK_HADOOP_CONFIG_PREFIX = "spark.hadoop.";
     private static final String SPARK_YARN_RESOURCE_MANAGER_ADDRESS = "spark.hadoop.yarn.resourcemanager.address";
@@ -110,20 +114,6 @@ public class SparkResource extends Resource {
 
     private static final String YARN_RESOURCE_MANAGER_ADDRESS_FOMART = "spark.hadoop.yarn.resourcemanager.address.%s";
     private static final String YARN_RESOURCE_MANAGER_HOSTNAME_FORMAT = "spark.hadoop.yarn.resourcemanager.hostname.%s";
-
-    public enum SparkMode {
-        YARN,
-        LIVY;
-
-        public static SparkMode fromString(String mode) {
-            for (SparkMode m : SparkMode.values()) {
-                if (m.name().equalsIgnoreCase(mode)) {
-                    return m;
-                }
-            }
-            return null;
-        }
-    }
 
     public enum DeployMode {
         CLUSTER,
@@ -139,33 +129,25 @@ public class SparkResource extends Resource {
         }
     }
 
-    @SerializedName(value = "sparkMode")
-    private SparkMode sparkMode;
     @SerializedName(value = "sparkConfigs")
-    private Map<String, String> sparkConfigs;
+    protected Map<String, String> sparkConfigs;
     @SerializedName(value = "workingDir")
-    private String workingDir;
+    protected String workingDir;
     @SerializedName(value = "broker")
-    private String broker;
+    protected String broker;
     // broker username and password
     @SerializedName(value = "brokerProperties")
-    private Map<String, String> brokerProperties;
+    protected Map<String, String> brokerProperties;
     @SerializedName(value = "hasBroker")
-    private boolean hasBroker;
-    @SerializedName(value = "livyUrl")
-    private String livyUrl;
-    @SerializedName(value = "livyUsername")
-    private String livyUsername;
-    @SerializedName(value = "livyPassword")
-    private String livyPassword;
+    protected boolean hasBroker;
 
     public SparkResource(String name) {
-        this(name, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
+        this(name, ResourceType.SPARK, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
     }
 
-    private SparkResource(String name, Map<String, String> sparkConfigs, String workingDir, String broker,
-                          Map<String, String> brokerProperties, boolean hasBroker) {
-        super(name, ResourceType.SPARK);
+    protected SparkResource(String name, ResourceType type, Map<String, String> sparkConfigs, String workingDir,
+                            String broker, Map<String, String> brokerProperties, boolean hasBroker) {
+        super(name, type);
         this.sparkConfigs = sparkConfigs;
         this.workingDir = workingDir;
         this.broker = broker;
@@ -213,13 +195,8 @@ public class SparkResource extends Resource {
     }
 
     public SparkResource getCopiedResource() {
-        SparkResource copied = new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker,
+        return new SparkResource(name, ResourceType.SPARK, Maps.newHashMap(sparkConfigs), workingDir, broker,
                 brokerProperties, hasBroker);
-        copied.sparkMode = this.sparkMode;
-        copied.livyUrl = this.livyUrl;
-        copied.livyUsername = this.livyUsername;
-        copied.livyPassword = this.livyPassword;
-        return copied;
     }
 
     // Each SparkResource has and only has one SparkRepository.
@@ -264,35 +241,12 @@ public class SparkResource extends Resource {
         return yarnClientPath;
     }
 
-    public SparkMode getSparkMode() {
-        return sparkMode != null ? sparkMode : SparkMode.YARN;
-    }
-
-    public boolean isYarnMode() {
-        return getSparkMode() == SparkMode.YARN;
-    }
-
     public boolean isYarnMaster() {
-        if (isYarnMode()) {
-            return getMaster() != null && getMaster().equalsIgnoreCase(YARN_MASTER);
-        }
-        return false;
+        return getMaster().equalsIgnoreCase(YARN_MASTER);
     }
 
     public boolean isLivyMode() {
-        return getSparkMode() == SparkMode.LIVY;
-    }
-
-    public String getLivyUrl() {
-        return livyUrl;
-    }
-
-    public String getLivyUsername() {
-        return livyUsername;
-    }
-
-    public String getLivyPassword() {
-        return livyPassword;
+        return false;
     }
 
     public void update(ResourceDesc resourceDesc) throws DdlException {
@@ -304,9 +258,6 @@ public class SparkResource extends Resource {
         }
 
         // update spark configs
-        if (properties.containsKey(SPARK_MODE)) {
-            throw new DdlException("Cannot change spark.mode");
-        }
         if (properties.containsKey(SPARK_MASTER)) {
             throw new DdlException("Cannot change spark master");
         }
@@ -321,86 +272,59 @@ public class SparkResource extends Resource {
             hasBroker = true;
         }
         brokerProperties.putAll(getBrokerProperties(properties));
-
-        if (properties.containsKey(LIVY_URL)) {
-            livyUrl = properties.get(LIVY_URL);
-        }
-        if (properties.containsKey(LIVY_USERNAME)) {
-            livyUsername = properties.get(LIVY_USERNAME);
-        }
-        if (properties.containsKey(LIVY_PASSWORD)) {
-            livyPassword = properties.get(LIVY_PASSWORD);
-        }
     }
 
     @Override
     protected void setProperties(Map<String, String> properties) throws DdlException {
         Preconditions.checkState(properties != null);
 
-        // parse spark.mode (default: yarn)
-        String modeStr = properties.get(SPARK_MODE);
-        if (modeStr != null) {
-            sparkMode = SparkMode.fromString(modeStr);
-            if (sparkMode == null) {
-                throw new DdlException("Unknown spark.mode: " + modeStr + ". Supported: yarn, livy");
-            }
-        } else {
-            sparkMode = SparkMode.YARN;
-        }
-
         // get spark configs
         sparkConfigs = getSparkConfig(properties);
-
-        if (isLivyMode()) {
-            // Livy mode: requires livy.url, no spark.master / spark.submit.deployMode needed
-            livyUrl = properties.get(LIVY_URL);
-            if (Strings.isNullOrEmpty(livyUrl)) {
-                throw new DdlException("Missing " + LIVY_URL + " in livy mode");
+        // check master and deploy mode
+        if (getMaster() == null) {
+            throw new DdlException("Missing " + SPARK_MASTER + " in properties");
+        }
+        String deployModeStr = sparkConfigs.get(SPARK_SUBMIT_DEPLOY_MODE);
+        if (deployModeStr != null) {
+            DeployMode deployMode = DeployMode.fromString(deployModeStr);
+            if (deployMode == null) {
+                throw new DdlException("Unknown deploy mode: " + deployModeStr);
             }
-            livyUsername = properties.get(LIVY_USERNAME);
-            livyPassword = properties.get(LIVY_PASSWORD);
         } else {
-            // YARN mode: requires spark.master, spark.submit.deployMode
-            if (getMaster() == null) {
-                throw new DdlException("Missing " + SPARK_MASTER + " in properties");
+            throw new DdlException("Missing " + SPARK_SUBMIT_DEPLOY_MODE + " in properties");
+        }
+
+        // if deploy machines do not set HADOOP_CONF_DIR env, we should set these configs blow
+        if (isYarnMaster()) {
+            // spark.hadoop.fs.defaultFS must be set
+            if (!sparkConfigs.containsKey(SPARK_FS_DEFAULT_FS)) {
+                throw new DdlException("Missing " + SPARK_FS_DEFAULT_FS + " in yarn master");
             }
-            String deployModeStr = sparkConfigs.get(SPARK_SUBMIT_DEPLOY_MODE);
-            if (deployModeStr != null) {
-                DeployMode deployMode = DeployMode.fromString(deployModeStr);
-                if (deployMode == null) {
-                    throw new DdlException("Unknown deploy mode: " + deployModeStr);
+
+            // check yarn resource manager
+            String resourceManagerHaEnabled = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_ENABLED);
+            if (sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_ADDRESS)) {
+                // standalone yarn resource manager
+            } else if (resourceManagerHaEnabled != null && resourceManagerHaEnabled.equalsIgnoreCase("true")) {
+                // yarn resource manager high availability
+                // spark.hadoop.yarn.resourcemanager.ha.rm-ids must be set
+                if (!sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS)) {
+                    throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS + " in yarn master");
+                }
+
+                // spark.hadoop.yarn.resourcemanager.hostname.rm-id or
+                // spark.hadoop.yarn.resourcemanager.address.rm-id must be set
+                String[] haRmIds = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS).split(",");
+                for (String haRmId : haRmIds) {
+                    String addressKey = String.format(YARN_RESOURCE_MANAGER_ADDRESS_FOMART, haRmId);
+                    String hostnameKey = String.format(YARN_RESOURCE_MANAGER_HOSTNAME_FORMAT, haRmId);
+                    if (!sparkConfigs.containsKey(addressKey) && !sparkConfigs.containsKey(hostnameKey)) {
+                        throw new DdlException("Missing " + addressKey + " or " + hostnameKey + " in yarn master");
+                    }
                 }
             } else {
-                throw new DdlException("Missing " + SPARK_SUBMIT_DEPLOY_MODE + " in properties");
-            }
-
-            if (isYarnMaster()) {
-                if (!sparkConfigs.containsKey(SPARK_FS_DEFAULT_FS)) {
-                    throw new DdlException("Missing " + SPARK_FS_DEFAULT_FS + " in yarn master");
-                }
-
-                String resourceManagerHaEnabled = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_ENABLED);
-                if (sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_ADDRESS)) {
-                    // standalone yarn resource manager
-                } else if (resourceManagerHaEnabled != null && resourceManagerHaEnabled.equalsIgnoreCase("true")) {
-                    if (!sparkConfigs.containsKey(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS)) {
-                        throw new DdlException(
-                                "Missing " + SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS + " in yarn master");
-                    }
-
-                    String[] haRmIds = sparkConfigs.get(SPARK_YARN_RESOURCE_MANAGER_HA_RMIDS).split(",");
-                    for (String haRmId : haRmIds) {
-                        String addressKey = String.format(YARN_RESOURCE_MANAGER_ADDRESS_FOMART, haRmId);
-                        String hostnameKey = String.format(YARN_RESOURCE_MANAGER_HOSTNAME_FORMAT, haRmId);
-                        if (!sparkConfigs.containsKey(addressKey) && !sparkConfigs.containsKey(hostnameKey)) {
-                            throw new DdlException(
-                                    "Missing " + addressKey + " or " + hostnameKey + " in yarn master");
-                        }
-                    }
-                } else {
-                    throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_ADDRESS +
-                            " or resource manager HA configs in yarn master");
-                }
+                throw new DdlException("Missing " + SPARK_YARN_RESOURCE_MANAGER_ADDRESS +
+                        " or resource manager HA configs in yarn master");
             }
         }
 
@@ -422,10 +346,10 @@ public class SparkResource extends Resource {
         brokerProperties = getBrokerProperties(properties);
     }
 
-    private Map<String, String> getSparkConfig(Map<String, String> properties) {
+    protected Map<String, String> getSparkConfig(Map<String, String> properties) {
         Map<String, String> sparkConfig = Maps.newHashMap();
         for (Map.Entry<String, String> entry : properties.entrySet()) {
-            if (entry.getKey().startsWith(SPARK_CONFIG_PREFIX) && !entry.getKey().equals(SPARK_MODE)) {
+            if (entry.getKey().startsWith(SPARK_CONFIG_PREFIX)) {
                 sparkConfig.put(entry.getKey(), entry.getValue());
             }
         }
@@ -442,7 +366,7 @@ public class SparkResource extends Resource {
         return sparkConfig;
     }
 
-    private Map<String, String> getBrokerProperties(Map<String, String> properties) {
+    protected Map<String, String> getBrokerProperties(Map<String, String> properties) {
         Map<String, String> brokerProperties = Maps.newHashMap();
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             if (entry.getKey().startsWith(BROKER_PROPERTY_PREFIX)) {
@@ -455,8 +379,6 @@ public class SparkResource extends Resource {
     @Override
     protected void getProcNodeData(BaseProcResult result) {
         String lowerCaseType = type.name().toLowerCase();
-        result.addRow(Lists.newArrayList(name, lowerCaseType, SPARK_MODE,
-                getSparkMode().name().toLowerCase()));
         for (Map.Entry<String, String> entry : sparkConfigs.entrySet()) {
             result.addRow(Lists.newArrayList(name, lowerCaseType, entry.getKey(), entry.getValue()));
         }
@@ -465,9 +387,6 @@ public class SparkResource extends Resource {
         }
         if (broker != null) {
             result.addRow(Lists.newArrayList(name, lowerCaseType, SparkResource.BROKER, broker));
-        }
-        if (livyUrl != null) {
-            result.addRow(Lists.newArrayList(name, lowerCaseType, SparkResource.LIVY_URL, livyUrl));
         }
         for (Map.Entry<String, String> entry : brokerProperties.entrySet()) {
             result.addRow(Lists.newArrayList(name, lowerCaseType, entry.getKey(), entry.getValue()));

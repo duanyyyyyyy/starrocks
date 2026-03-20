@@ -15,7 +15,7 @@
 package com.starrocks.load.loadv2;
 
 import com.google.common.collect.Maps;
-import com.starrocks.catalog.SparkResource;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.LoadException;
@@ -63,22 +63,20 @@ public class LivySparkSubmitterTest {
     }
 
     @Test
-    public void testSubmit(@Mocked BrokerUtil brokerUtil, @Mocked LivyClient livyClient) throws LoadException {
+    public void testSubmit(@Mocked BrokerUtil brokerUtil) throws LoadException {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("starting");
         mockResponse.setAppId(null);
 
-        new Expectations() {
-            {
-                new LivyClient(livyUrl);
-                result = livyClient;
-                livyClient.submitBatch(withNotNull());
-                result = mockResponse;
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse submitBatch(Object requestBody) {
+                return mockResponse;
             }
         };
 
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         new Expectations(resource) {
             {
                 resource.prepareArchive();
@@ -89,10 +87,6 @@ public class LivySparkSubmitterTest {
                 result = "hdfs://127.0.0.1:10000/tmp/starrocks";
             }
         };
-
-        Map<String, String> sparkConfigs = resource.getSparkConfigs();
-        sparkConfigs.put("spark.master", "yarn");
-        sparkConfigs.put("spark.submit.deployMode", "cluster");
 
         EtlJobConfig etlJobConfig = new EtlJobConfig(Maps.newHashMap(), etlOutputPath, label, null);
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
@@ -109,23 +103,21 @@ public class LivySparkSubmitterTest {
     }
 
     @Test
-    public void testGetStatusRunning(@Mocked LivyClient livyClient) throws StarRocksException {
+    public void testGetStatusRunning() throws StarRocksException {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("running");
         mockResponse.setAppId("application_123_001");
         mockResponse.setAppInfo(Map.of("sparkUiUrl", "http://spark-ui:4040"));
 
-        new Expectations() {
-            {
-                new LivyClient(livyUrl);
-                result = livyClient;
-                livyClient.getBatchStatus(42);
-                result = mockResponse;
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse getBatchStatus(int batchId) {
+                return mockResponse;
             }
         };
 
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         new Expectations(resource) {
             {
                 resource.getLivyUrl();
@@ -142,27 +134,28 @@ public class LivySparkSubmitterTest {
     }
 
     @Test
-    public void testGetStatusSuccess(@Mocked LivyClient livyClient, @Mocked BrokerUtil brokerUtil)
-            throws StarRocksException {
+    public void testGetStatusSuccess(@Mocked BrokerUtil brokerUtil) throws StarRocksException {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("success");
         mockResponse.setAppId("application_123_001");
         mockResponse.setAppInfo(Map.of("sparkUiUrl", "http://spark-ui:4040"));
 
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse getBatchStatus(int batchId) {
+                return mockResponse;
+            }
+        };
+
         new Expectations() {
             {
-                new LivyClient(livyUrl);
-                result = livyClient;
-                livyClient.getBatchStatus(42);
-                result = mockResponse;
-
                 BrokerUtil.readFile(anyString, (BrokerDesc) any);
                 result = "{'normal_rows': 100, 'abnormal_rows': 0}";
             }
         };
 
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         new Expectations(resource) {
             {
                 resource.getLivyUrl();
@@ -179,27 +172,28 @@ public class LivySparkSubmitterTest {
     }
 
     @Test
-    public void testGetStatusDead(@Mocked LivyClient livyClient, @Mocked BrokerUtil brokerUtil)
-            throws StarRocksException {
+    public void testGetStatusDead(@Mocked BrokerUtil brokerUtil) throws StarRocksException {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("dead");
         mockResponse.setAppId("application_123_001");
         mockResponse.setAppInfo(Map.of());
 
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse getBatchStatus(int batchId) {
+                return mockResponse;
+            }
+        };
+
         new Expectations() {
             {
-                new LivyClient(livyUrl);
-                result = livyClient;
-                livyClient.getBatchStatus(42);
-                result = mockResponse;
-
                 BrokerUtil.readFile(anyString, (BrokerDesc) any);
                 result = "{'normal_rows': 0, 'abnormal_rows': 0, 'failed_reason': 'OOM'}";
             }
         };
 
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         new Expectations(resource) {
             {
                 resource.getLivyUrl();
@@ -217,7 +211,7 @@ public class LivySparkSubmitterTest {
 
     @Test
     public void testGetStatusInvalidBatchId() throws StarRocksException {
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         LivySparkSubmitter submitter = new LivySparkSubmitter();
         EtlStatus status = submitter.getStatus("not_a_number", loadJobId, etlOutputPath, resource, brokerDesc);
@@ -227,16 +221,15 @@ public class LivySparkSubmitterTest {
     }
 
     @Test
-    public void testKill(@Mocked LivyClient livyClient) throws StarRocksException {
-        new Expectations() {
-            {
-                new LivyClient(livyUrl);
-                result = livyClient;
-                livyClient.deleteBatch(42);
+    public void testKill() throws StarRocksException {
+        new MockUp<LivyClient>() {
+            @Mock
+            public void deleteBatch(int batchId) {
+                // no-op
             }
         };
 
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         new Expectations(resource) {
             {
                 resource.getLivyUrl();
@@ -250,7 +243,7 @@ public class LivySparkSubmitterTest {
 
     @Test
     public void testKillInvalidBatchId() throws StarRocksException {
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         LivySparkSubmitter submitter = new LivySparkSubmitter();
         // should not throw, just log warning
         submitter.kill("invalid", loadJobId, resource);
@@ -259,10 +252,9 @@ public class LivySparkSubmitterTest {
     @Test
     public void testLivyStateMapping() throws StarRocksException {
         LivySparkSubmitter submitter = new LivySparkSubmitter();
-        SparkResource resource = new SparkResource(resourceName);
+        LivyResource resource = new LivyResource(resourceName);
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
 
-        // Test each Livy state mapping via getStatus
         String[] runningStates = {"not_started", "starting", "running", "busy", "idle"};
         for (String state : runningStates) {
             LivyBatchResponse response = new LivyBatchResponse();

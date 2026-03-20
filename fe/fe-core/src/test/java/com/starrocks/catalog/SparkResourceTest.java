@@ -100,7 +100,7 @@ public class SparkResourceTest {
             }
         };
 
-        // master: spark, deploy_mode: cluster (default yarn mode)
+        // master: spark, deploy_mode: cluster
         CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
         com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
         SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
@@ -112,8 +112,6 @@ public class SparkResourceTest {
         Assertions.assertEquals(broker, resource.getBroker());
         Assertions.assertEquals(2, resource.getSparkConfigs().size());
         Assertions.assertFalse(resource.isYarnMaster());
-        Assertions.assertTrue(resource.isYarnMode());
-        Assertions.assertFalse(resource.isLivyMode());
 
         // master: spark, deploy_mode: client
         properties.put("spark.submit.deployMode", "client");
@@ -136,10 +134,10 @@ public class SparkResourceTest {
         Assertions.assertTrue(resource.isYarnMaster());
         Map<String, String> map = resource.getSparkConfigs();
         Assertions.assertEquals(7, map.size());
-        // test getProcNodeData (now includes spark.mode row)
+        // test getProcNodeData
         BaseProcResult result = new BaseProcResult();
         resource.getProcNodeData(result);
-        Assertions.assertEquals(10, result.getRows().size());
+        Assertions.assertEquals(9, result.getRows().size());
 
         // master: yarn, deploy_mode: cluster
         // yarn resource manager ha
@@ -225,174 +223,6 @@ public class SparkResourceTest {
         Assertions.assertEquals("1g", resource.getSparkConfigs().get("spark.driver.memory"));
         Assertions.assertEquals(6, map.size());
         Assertions.assertEquals("2g", copiedResource.getSparkConfigs().get("spark.driver.memory"));
-    }
-
-    @Test
-    public void testLivyMode(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
-            throws StarRocksException {
-        new Expectations() {
-            {
-                globalStateMgr.getBrokerMgr();
-                result = brokerMgr;
-                brokerMgr.containsBroker(broker);
-                result = true;
-            }
-        };
-
-        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
-        new Expectations() {
-            {
-                globalStateMgr.getAnalyzer();
-                result = analyzer;
-            }
-        };
-
-        // Livy mode: only needs spark.mode, livy.url, working_dir, broker
-        properties.clear();
-        properties.put("type", type);
-        properties.put("spark.mode", "livy");
-        properties.put("livy.url", "http://livy-server:8998");
-        properties.put("working_dir", workingDir);
-        properties.put("broker", broker);
-        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
-        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
-        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
-        Assertions.assertTrue(resource.isLivyMode());
-        Assertions.assertFalse(resource.isYarnMode());
-        Assertions.assertFalse(resource.isYarnMaster());
-        Assertions.assertEquals("http://livy-server:8998", resource.getLivyUrl());
-
-        // test getCopiedResource preserves mode and livyUrl
-        SparkResource copied = resource.getCopiedResource();
-        Assertions.assertTrue(copied.isLivyMode());
-        Assertions.assertEquals("http://livy-server:8998", copied.getLivyUrl());
-
-        // test getProcNodeData includes spark.mode and livy.url
-        BaseProcResult result = new BaseProcResult();
-        resource.getProcNodeData(result);
-        boolean hasSparkMode = result.getRows().stream()
-                .anyMatch(row -> row.get(2).equals("spark.mode") && row.get(3).equals("livy"));
-        boolean hasLivyUrl = result.getRows().stream()
-                .anyMatch(row -> row.get(2).equals("livy.url"));
-        Assertions.assertTrue(hasSparkMode);
-        Assertions.assertTrue(hasLivyUrl);
-    }
-
-    @Test
-    public void testLivyBasicAuth(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
-            throws StarRocksException {
-        new Expectations() {
-            {
-                globalStateMgr.getBrokerMgr();
-                result = brokerMgr;
-                brokerMgr.containsBroker(broker);
-                result = true;
-            }
-        };
-
-        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
-        new Expectations() {
-            {
-                globalStateMgr.getAnalyzer();
-                result = analyzer;
-            }
-        };
-
-        properties.clear();
-        properties.put("type", type);
-        properties.put("spark.mode", "livy");
-        properties.put("livy.url", "http://livy-server:8998");
-        properties.put("livy.username", "admin");
-        properties.put("livy.password", "secret");
-        properties.put("working_dir", workingDir);
-        properties.put("broker", broker);
-        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
-        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
-        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
-        Assertions.assertTrue(resource.isLivyMode());
-        Assertions.assertEquals("admin", resource.getLivyUsername());
-        Assertions.assertEquals("secret", resource.getLivyPassword());
-
-        // test getCopiedResource preserves auth
-        SparkResource copied = resource.getCopiedResource();
-        Assertions.assertEquals("admin", copied.getLivyUsername());
-        Assertions.assertEquals("secret", copied.getLivyPassword());
-
-        // test update auth
-        SparkResource copied2 = resource.getCopiedResource();
-        Map<String, String> updateProps = Maps.newHashMap();
-        updateProps.put("livy.username", "newuser");
-        updateProps.put("livy.password", "newpass");
-        ResourceDesc desc = new ResourceDesc(name, updateProps);
-        copied2.update(desc);
-        Assertions.assertEquals("newuser", copied2.getLivyUsername());
-        Assertions.assertEquals("newpass", copied2.getLivyPassword());
-    }
-
-    @Test
-    public void testDefaultYarnMode() {
-        SparkResource resource = new SparkResource("spark_default");
-        Assertions.assertTrue(resource.isYarnMode());
-        Assertions.assertFalse(resource.isLivyMode());
-    }
-
-    @Test
-    public void testLivyModeMissingUrl(@Mocked GlobalStateMgr globalStateMgr) {
-        assertThrows(DdlException.class, () -> {
-            Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
-            new Expectations() {
-                {
-                    globalStateMgr.getAnalyzer();
-                    result = analyzer;
-                }
-            };
-
-            Map<String, String> props = Maps.newHashMap();
-            props.put("type", "spark");
-            props.put("spark.mode", "livy");
-            // missing livy.url
-            CreateResourceStmt stmt = new CreateResourceStmt(true, name, props);
-            com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
-            Resource.fromStmt(stmt);
-        });
-    }
-
-    @Test
-    public void testCannotChangeSparkMode(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
-            throws StarRocksException {
-        new Expectations() {
-            {
-                globalStateMgr.getBrokerMgr();
-                result = brokerMgr;
-                brokerMgr.containsBroker(broker);
-                result = true;
-            }
-        };
-
-        Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
-        new Expectations() {
-            {
-                globalStateMgr.getAnalyzer();
-                result = analyzer;
-            }
-        };
-
-        properties.clear();
-        properties.put("type", type);
-        properties.put("spark.mode", "livy");
-        properties.put("livy.url", "http://livy:8998");
-        properties.put("working_dir", workingDir);
-        properties.put("broker", broker);
-        CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
-        com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
-        SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
-
-        // trying to change spark.mode should throw
-        SparkResource copied = resource.getCopiedResource();
-        Map<String, String> updateProps = Maps.newHashMap();
-        updateProps.put("spark.mode", "yarn");
-        ResourceDesc desc = new ResourceDesc(name, updateProps);
-        assertThrows(DdlException.class, () -> copied.update(desc));
     }
 
     @Test
