@@ -47,6 +47,7 @@ import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.Replica;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.ResourceMgr;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.catalog.UserIdentity;
@@ -287,11 +288,16 @@ public class SparkLoadJobTest {
     }
 
     private SparkLoadJob getEtlStateJob(String originStmt) throws MetaNotFoundException {
-        SparkResource resource = new SparkResource(resourceName);
-        Map<String, String> sparkConfigs = resource.getSparkConfigs();
-        sparkConfigs.put("spark.master", "yarn");
-        sparkConfigs.put("spark.submit.deployMode", "cluster");
-        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
+        return getEtlStateJob(originStmt, new SparkResource(resourceName));
+    }
+
+    private SparkLoadJob getEtlStateJob(String originStmt, SparkResource resource) throws MetaNotFoundException {
+        if (resource instanceof SparkResource && !(resource instanceof LivyResource)) {
+            Map<String, String> sparkConfigs = resource.getSparkConfigs();
+            sparkConfigs.put("spark.master", "yarn");
+            sparkConfigs.put("spark.submit.deployMode", "cluster");
+            sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
+        }
         SparkLoadJob job = new SparkLoadJob(dbId, label, null, new OriginStatement(originStmt, 0));
         job.state = JobState.ETL;
         job.maxFilterRatio = 0.15;
@@ -625,5 +631,100 @@ public class SparkLoadJobTest {
         Deencapsulation.setField(job, "tableToLoadPartitions", Maps.newHashMap());
         ExceptionChecker.expectThrowsWithMsg(LoadException.class, "No rows were imported from upstream",
                 () -> Deencapsulation.invoke(job, "submitPushTasks"));
+    }
+
+    // ==================== Livy mode tests ====================
+
+    @Test
+    public void testLivyCreateFromLoadStmt(@Mocked GlobalStateMgr globalStateMgr, @Injectable LoadStmt loadStmt,
+                                           @Injectable DataDescription dataDescription, @Injectable LabelName labelName,
+                                           @Injectable Database db, @Injectable OlapTable olapTable,
+                                           @Injectable ResourceMgr resourceMgr) {
+        List<DataDescription> dataDescriptionList = Lists.newArrayList();
+        dataDescriptionList.add(dataDescription);
+        Map<String, String> resourceProperties = Maps.newHashMap();
+        resourceProperties.put("broker", broker);
+        resourceProperties.put("broker.username", "user0");
+        resourceProperties.put("broker.password", "password0");
+        ResourceDesc resourceDesc = new ResourceDesc(resourceName, resourceProperties);
+        Map<String, String> jobProperties = Maps.newHashMap();
+        LivyResource resource = new LivyResource(resourceName);
+
+        new Expectations() {
+            {
+                globalStateMgr.getLocalMetastore().getDb(dbName);
+                result = db;
+                globalStateMgr.getResourceMgr();
+                result = resourceMgr;
+                GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), tableName);
+                result = olapTable;
+                db.getId();
+                result = dbId;
+                loadStmt.getLabel();
+                result = labelName;
+                loadStmt.getDataDescriptions();
+                result = dataDescriptionList;
+                loadStmt.getResourceDesc();
+                result = resourceDesc;
+                loadStmt.getProperties();
+                result = jobProperties;
+                loadStmt.getEtlJobType();
+                result = EtlJobType.SPARK;
+                labelName.getDbName();
+                result = dbName;
+                labelName.getLabelName();
+                result = label;
+                dataDescription.getTableName();
+                result = tableName;
+                dataDescription.getPartitionNames();
+                result = null;
+                resourceMgr.getResource(resourceName);
+                result = resource;
+            }
+        };
+
+        new Expectations(ctx) {
+            {
+                ConnectContext.get();
+                result = ctx;
+            }
+        };
+
+        try {
+            BulkLoadJob bulkLoadJob = BulkLoadJob.fromLoadStmt(loadStmt, null);
+            SparkLoadJob sparkLoadJob = (SparkLoadJob) bulkLoadJob;
+            Assertions.assertEquals(resourceName, sparkLoadJob.getResourceName());
+            Assertions.assertEquals(EtlJobType.SPARK, bulkLoadJob.getJobType());
+
+            // verify the sparkResource field is a LivyResource
+            SparkResource sparkResource = Deencapsulation.getField(sparkLoadJob, "sparkResource");
+            Assertions.assertInstanceOf(LivyResource.class, sparkResource);
+            Assertions.assertTrue(sparkResource.isLivyMode());
+        } catch (DdlException e) {
+            Assertions.fail(e.getMessage());
+        }
+    }
+
+    @Test
+    public void testLivyUpdateEtlStatusRunning(@Mocked GlobalStateMgr globalStateMgr, @Injectable String originStmt,
+                                                @Mocked SparkEtlJobHandler handler) throws Exception {
+        EtlStatus status = new EtlStatus();
+        status.setState(TEtlState.RUNNING);
+        status.setTrackingUrl("http://spark-ui:4040");
+
+        new Expectations() {
+            {
+                handler.getEtlJobStatus((SparkLoadAppHandle) any, appId, anyLong, etlOutputPath,
+                        (SparkResource) any, (BrokerDesc) any);
+                result = status;
+            }
+        };
+
+        LivyResource livyResource = new LivyResource(resourceName);
+        SparkLoadJob job = getEtlStateJob(originStmt, livyResource);
+        job.updateEtlStatus();
+
+        Assertions.assertEquals(JobState.ETL, job.getState());
+        Assertions.assertEquals("http://spark-ui:4040", job.loadingStatus.getTrackingUrl());
     }
 }
