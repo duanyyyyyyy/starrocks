@@ -100,7 +100,7 @@ public class SparkResourceTest {
             }
         };
 
-        // master: spark, deploy_mode: cluster
+        // master: spark, deploy_mode: cluster (default yarn mode)
         CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
         com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
         SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
@@ -112,6 +112,8 @@ public class SparkResourceTest {
         Assertions.assertEquals(broker, resource.getBroker());
         Assertions.assertEquals(2, resource.getSparkConfigs().size());
         Assertions.assertFalse(resource.isYarnMaster());
+        Assertions.assertTrue(resource.isYarnMode());
+        Assertions.assertFalse(resource.isLivyMode());
 
         // master: spark, deploy_mode: client
         properties.put("spark.submit.deployMode", "client");
@@ -134,10 +136,10 @@ public class SparkResourceTest {
         Assertions.assertTrue(resource.isYarnMaster());
         Map<String, String> map = resource.getSparkConfigs();
         Assertions.assertEquals(7, map.size());
-        // test getProcNodeData
+        // test getProcNodeData (now includes spark.mode row)
         BaseProcResult result = new BaseProcResult();
         resource.getProcNodeData(result);
-        Assertions.assertEquals(9, result.getRows().size());
+        Assertions.assertEquals(10, result.getRows().size());
 
         // master: yarn, deploy_mode: cluster
         // yarn resource manager ha
@@ -245,28 +247,34 @@ public class SparkResourceTest {
             }
         };
 
-        // Livy mode: yarn master with livy.url, no YARN RM address required
-        properties.put("spark.master", "yarn");
-        properties.put("spark.submit.deployMode", "cluster");
-        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        // Livy mode: only needs spark.mode, livy.url, working_dir, broker
+        properties.clear();
+        properties.put("type", type);
+        properties.put("spark.mode", "livy");
         properties.put("livy.url", "http://livy-server:8998");
+        properties.put("working_dir", workingDir);
+        properties.put("broker", broker);
         CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
         com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
         SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
-        Assertions.assertTrue(resource.isYarnMaster());
         Assertions.assertTrue(resource.isLivyMode());
+        Assertions.assertFalse(resource.isYarnMode());
+        Assertions.assertFalse(resource.isYarnMaster());
         Assertions.assertEquals("http://livy-server:8998", resource.getLivyUrl());
 
-        // test getCopiedResource preserves livyUrl
+        // test getCopiedResource preserves mode and livyUrl
         SparkResource copied = resource.getCopiedResource();
         Assertions.assertTrue(copied.isLivyMode());
         Assertions.assertEquals("http://livy-server:8998", copied.getLivyUrl());
 
-        // test getProcNodeData includes livy.url
+        // test getProcNodeData includes spark.mode and livy.url
         BaseProcResult result = new BaseProcResult();
         resource.getProcNodeData(result);
+        boolean hasSparkMode = result.getRows().stream()
+                .anyMatch(row -> row.get(2).equals("spark.mode") && row.get(3).equals("livy"));
         boolean hasLivyUrl = result.getRows().stream()
                 .anyMatch(row -> row.get(2).equals("livy.url"));
+        Assertions.assertTrue(hasSparkMode);
         Assertions.assertTrue(hasLivyUrl);
     }
 
@@ -290,12 +298,14 @@ public class SparkResourceTest {
             }
         };
 
-        properties.put("spark.master", "yarn");
-        properties.put("spark.submit.deployMode", "cluster");
-        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        properties.clear();
+        properties.put("type", type);
+        properties.put("spark.mode", "livy");
         properties.put("livy.url", "http://livy-server:8998");
         properties.put("livy.username", "admin");
         properties.put("livy.password", "secret");
+        properties.put("working_dir", workingDir);
+        properties.put("broker", broker);
         CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
         com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
         SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
@@ -320,14 +330,35 @@ public class SparkResourceTest {
     }
 
     @Test
-    public void testNonLivyMode() {
-        SparkResource resource = new SparkResource("spark_non_livy");
+    public void testDefaultYarnMode() {
+        SparkResource resource = new SparkResource("spark_default");
+        Assertions.assertTrue(resource.isYarnMode());
         Assertions.assertFalse(resource.isLivyMode());
-        Assertions.assertNull(resource.getLivyUrl());
     }
 
     @Test
-    public void testLivyModeUpdate(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
+    public void testLivyModeMissingUrl(@Mocked GlobalStateMgr globalStateMgr) {
+        assertThrows(DdlException.class, () -> {
+            Analyzer analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
+            new Expectations() {
+                {
+                    globalStateMgr.getAnalyzer();
+                    result = analyzer;
+                }
+            };
+
+            Map<String, String> props = Maps.newHashMap();
+            props.put("type", "spark");
+            props.put("spark.mode", "livy");
+            // missing livy.url
+            CreateResourceStmt stmt = new CreateResourceStmt(true, name, props);
+            com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
+            Resource.fromStmt(stmt);
+        });
+    }
+
+    @Test
+    public void testCannotChangeSparkMode(@Injectable BrokerMgr brokerMgr, @Mocked GlobalStateMgr globalStateMgr)
             throws StarRocksException {
         new Expectations() {
             {
@@ -346,24 +377,22 @@ public class SparkResourceTest {
             }
         };
 
-        // create without livy
-        properties.put("spark.master", "yarn");
-        properties.put("spark.submit.deployMode", "cluster");
-        properties.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
-        properties.put("spark.hadoop.fs.defaultFS", "hdfs://127.0.0.1:10000");
+        properties.clear();
+        properties.put("type", type);
+        properties.put("spark.mode", "livy");
+        properties.put("livy.url", "http://livy:8998");
+        properties.put("working_dir", workingDir);
+        properties.put("broker", broker);
         CreateResourceStmt stmt = new CreateResourceStmt(true, name, properties);
         com.starrocks.sql.analyzer.Analyzer.analyze(stmt, connectContext);
         SparkResource resource = (SparkResource) Resource.fromStmt(stmt);
-        Assertions.assertFalse(resource.isLivyMode());
 
-        // update with livy.url
+        // trying to change spark.mode should throw
         SparkResource copied = resource.getCopiedResource();
         Map<String, String> updateProps = Maps.newHashMap();
-        updateProps.put("livy.url", "http://livy:8998");
+        updateProps.put("spark.mode", "yarn");
         ResourceDesc desc = new ResourceDesc(name, updateProps);
-        copied.update(desc);
-        Assertions.assertTrue(copied.isLivyMode());
-        Assertions.assertEquals("http://livy:8998", copied.getLivyUrl());
+        assertThrows(DdlException.class, () -> copied.update(desc));
     }
 
     @Test

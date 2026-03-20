@@ -1122,18 +1122,6 @@ public class Config extends ConfigBase {
     public static long spark_load_submit_timeout_second = 300; // 5min
 
     /**
-     * Livy HTTP connection timeout in milliseconds.
-     */
-    @ConfField(mutable = true)
-    public static int livy_http_connect_timeout_ms = 5000;
-
-    /**
-     * Livy HTTP read timeout in milliseconds.
-     */
-    @ConfField(mutable = true)
-    public static int livy_http_read_timeout_ms = 30000;
-
-    /**
      * Maximal bytes that a single broker scanner will read.
      * Do not set this if you know what you are doing.
      */

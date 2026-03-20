@@ -15,7 +15,6 @@
 package com.starrocks.load.loadv2;
 
 import com.google.gson.Gson;
-import com.starrocks.common.Config;
 import com.starrocks.common.LoadException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -35,6 +34,8 @@ import java.util.Base64;
 public class LivyClient {
     private static final Logger LOG = LogManager.getLogger(LivyClient.class);
     private static final Gson GSON = new Gson();
+    private static final int CONNECT_TIMEOUT_MS = 5000;
+    private static final int READ_TIMEOUT_MS = 30000;
 
     private final String livyUrl;
     private final String authHeader;
@@ -122,8 +123,8 @@ public class LivyClient {
     private HttpURLConnection openConnection(String urlStr) throws IOException {
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setConnectTimeout(Config.livy_http_connect_timeout_ms);
-        conn.setReadTimeout(Config.livy_http_read_timeout_ms);
+        conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(READ_TIMEOUT_MS);
         if (authHeader != null) {
             conn.setRequestProperty("Authorization", authHeader);
         }

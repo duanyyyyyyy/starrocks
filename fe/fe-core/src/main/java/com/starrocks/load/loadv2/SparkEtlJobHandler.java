@@ -108,7 +108,7 @@ public class SparkEtlJobHandler {
             throws StarRocksException {
         // For YARN mode, the appId may be empty when the load job is in PENDING phase.
         // In this case, try to get appId from handle, or kill the launcher process directly.
-        if (resource.isYarnMaster()) {
+        if (resource.isYarnMode()) {
             if (Strings.isNullOrEmpty(appId)) {
                 appId = handle != null ? handle.getAppId() : null;
                 if (Strings.isNullOrEmpty(appId)) {
