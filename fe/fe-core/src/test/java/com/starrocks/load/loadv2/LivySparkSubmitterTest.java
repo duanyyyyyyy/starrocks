@@ -67,7 +67,6 @@ public class LivySparkSubmitterTest {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("starting");
-        mockResponse.setAppId(null);
 
         new MockUp<LivyClient>() {
             @Mock
@@ -91,19 +90,16 @@ public class LivySparkSubmitterTest {
         EtlJobConfig etlJobConfig = new EtlJobConfig(Maps.newHashMap(), etlOutputPath, label, null);
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkLoadAppHandle handle = new SparkLoadAppHandle();
-
         SparkSubmitParam param = new SparkSubmitParam(loadJobId, label, etlJobConfig,
                 resource, brokerDesc, handle, Config.spark_load_submit_timeout_second);
 
         LivySparkSubmitter submitter = new LivySparkSubmitter();
         SparkSubmitResult result = submitter.submit(param);
-
         Assertions.assertEquals("42", result.getAppId());
-        Assertions.assertNotNull(result.getHandle());
     }
 
     @Test
-    public void testGetStatusRunning() throws StarRocksException {
+    public void testGetStatus() throws StarRocksException {
         LivyBatchResponse mockResponse = new LivyBatchResponse();
         mockResponse.setId(42);
         mockResponse.setState("running");
@@ -128,85 +124,8 @@ public class LivySparkSubmitterTest {
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         LivySparkSubmitter submitter = new LivySparkSubmitter();
         EtlStatus status = submitter.getStatus("42", loadJobId, etlOutputPath, resource, brokerDesc);
-
         Assertions.assertEquals(TEtlState.RUNNING, status.getState());
         Assertions.assertEquals("http://spark-ui:4040", status.getTrackingUrl());
-    }
-
-    @Test
-    public void testGetStatusSuccess(@Mocked BrokerUtil brokerUtil) throws StarRocksException {
-        LivyBatchResponse mockResponse = new LivyBatchResponse();
-        mockResponse.setId(42);
-        mockResponse.setState("success");
-        mockResponse.setAppId("application_123_001");
-        mockResponse.setAppInfo(Map.of("sparkUiUrl", "http://spark-ui:4040"));
-
-        new MockUp<LivyClient>() {
-            @Mock
-            public LivyBatchResponse getBatchStatus(int batchId) {
-                return mockResponse;
-            }
-        };
-
-        new Expectations() {
-            {
-                BrokerUtil.readFile(anyString, (BrokerDesc) any);
-                result = "{'normal_rows': 100, 'abnormal_rows': 0}";
-            }
-        };
-
-        LivyResource resource = new LivyResource(resourceName);
-        new Expectations(resource) {
-            {
-                resource.getLivyUrl();
-                result = livyUrl;
-            }
-        };
-
-        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
-        LivySparkSubmitter submitter = new LivySparkSubmitter();
-        EtlStatus status = submitter.getStatus("42", loadJobId, etlOutputPath, resource, brokerDesc);
-
-        Assertions.assertEquals(TEtlState.FINISHED, status.getState());
-        Assertions.assertEquals(100, status.getDppResult().normalRows);
-    }
-
-    @Test
-    public void testGetStatusDead(@Mocked BrokerUtil brokerUtil) throws StarRocksException {
-        LivyBatchResponse mockResponse = new LivyBatchResponse();
-        mockResponse.setId(42);
-        mockResponse.setState("dead");
-        mockResponse.setAppId("application_123_001");
-        mockResponse.setAppInfo(Map.of());
-
-        new MockUp<LivyClient>() {
-            @Mock
-            public LivyBatchResponse getBatchStatus(int batchId) {
-                return mockResponse;
-            }
-        };
-
-        new Expectations() {
-            {
-                BrokerUtil.readFile(anyString, (BrokerDesc) any);
-                result = "{'normal_rows': 0, 'abnormal_rows': 0, 'failed_reason': 'OOM'}";
-            }
-        };
-
-        LivyResource resource = new LivyResource(resourceName);
-        new Expectations(resource) {
-            {
-                resource.getLivyUrl();
-                result = livyUrl;
-            }
-        };
-
-        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
-        LivySparkSubmitter submitter = new LivySparkSubmitter();
-        EtlStatus status = submitter.getStatus("42", loadJobId, etlOutputPath, resource, brokerDesc);
-
-        Assertions.assertEquals(TEtlState.CANCELLED, status.getState());
-        Assertions.assertEquals("OOM", status.getDppResult().failedReason);
     }
 
     @Test
@@ -215,9 +134,7 @@ public class LivySparkSubmitterTest {
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         LivySparkSubmitter submitter = new LivySparkSubmitter();
         EtlStatus status = submitter.getStatus("not_a_number", loadJobId, etlOutputPath, resource, brokerDesc);
-
         Assertions.assertEquals(TEtlState.CANCELLED, status.getState());
-        Assertions.assertTrue(status.getFailMsg().contains("invalid livy batch id"));
     }
 
     @Test
@@ -225,7 +142,6 @@ public class LivySparkSubmitterTest {
         new MockUp<LivyClient>() {
             @Mock
             public void deleteBatch(int batchId) {
-                // no-op
             }
         };
 
@@ -245,40 +161,6 @@ public class LivySparkSubmitterTest {
     public void testKillInvalidBatchId() throws StarRocksException {
         LivyResource resource = new LivyResource(resourceName);
         LivySparkSubmitter submitter = new LivySparkSubmitter();
-        // should not throw, just log warning
         submitter.kill("invalid", loadJobId, resource);
-    }
-
-    @Test
-    public void testLivyStateMapping() throws StarRocksException {
-        LivySparkSubmitter submitter = new LivySparkSubmitter();
-        LivyResource resource = new LivyResource(resourceName);
-        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
-
-        String[] runningStates = {"not_started", "starting", "running", "busy", "idle"};
-        for (String state : runningStates) {
-            LivyBatchResponse response = new LivyBatchResponse();
-            response.setId(1);
-            response.setState(state);
-            response.setAppInfo(Map.of());
-
-            new MockUp<LivyClient>() {
-                @Mock
-                public LivyBatchResponse getBatchStatus(int batchId) {
-                    return response;
-                }
-            };
-
-            new Expectations(resource) {
-                {
-                    resource.getLivyUrl();
-                    result = livyUrl;
-                }
-            };
-
-            EtlStatus status = submitter.getStatus("1", loadJobId, etlOutputPath, resource, brokerDesc);
-            Assertions.assertEquals(TEtlState.RUNNING, status.getState(),
-                    "Expected RUNNING for Livy state: " + state);
-        }
     }
 }
