@@ -1217,6 +1217,18 @@ public class Config extends ConfigBase {
     public static String spark_launcher_log_dir = sys_log_dir + "/spark_launcher_log";
 
     /**
+     * HTTP connect timeout in milliseconds for Livy REST API calls.
+     */
+    @ConfField(mutable = true)
+    public static int livy_http_connect_timeout_ms = 5000;
+
+    /**
+     * HTTP read timeout in milliseconds for Livy REST API calls.
+     */
+    @ConfField(mutable = true)
+    public static int livy_http_read_timeout_ms = 30000;
+
+    /**
      * Default yarn client path
      */
     @ConfField

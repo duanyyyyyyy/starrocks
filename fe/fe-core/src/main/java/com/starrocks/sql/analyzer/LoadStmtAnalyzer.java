@@ -116,7 +116,8 @@ public class LoadStmtAnalyzer {
                     if (resource == null) {
                         throw new AnalysisException("Resource does not exist. name: " + resourceDesc.getName());
                     }
-                    if (resource.getType() == Resource.ResourceType.SPARK) {
+                    if (resource.getType() == Resource.ResourceType.SPARK
+                            || resource.getType() == Resource.ResourceType.SPARK_LIVY) {
                         etlJobType = EtlJobType.SPARK;
                     } else {
                         etlJobType = EtlJobType.UNKNOWN;

@@ -99,11 +99,11 @@ import java.util.Map;
 public class SparkResource extends Resource {
     private static final String SPARK_MASTER = "spark.master";
     private static final String SPARK_SUBMIT_DEPLOY_MODE = "spark.submit.deployMode";
-    private static final String WORKING_DIR = "working_dir";
-    private static final String BROKER = "broker";
+    protected static final String WORKING_DIR = "working_dir";
+    protected static final String BROKER = "broker";
     private static final String YARN_MASTER = "yarn";
-    private static final String SPARK_CONFIG_PREFIX = "spark.";
-    private static final String BROKER_PROPERTY_PREFIX = "broker.";
+    protected static final String SPARK_CONFIG_PREFIX = "spark.";
+    protected static final String BROKER_PROPERTY_PREFIX = "broker.";
     // spark uses hadoop configs in the form of spark.hadoop.*
     private static final String SPARK_HADOOP_CONFIG_PREFIX = "spark.hadoop.";
     private static final String SPARK_YARN_RESOURCE_MANAGER_ADDRESS = "spark.hadoop.yarn.resourcemanager.address";
@@ -130,24 +130,24 @@ public class SparkResource extends Resource {
     }
 
     @SerializedName(value = "sparkConfigs")
-    private Map<String, String> sparkConfigs;
+    protected Map<String, String> sparkConfigs;
     @SerializedName(value = "workingDir")
-    private String workingDir;
+    protected String workingDir;
     @SerializedName(value = "broker")
-    private String broker;
+    protected String broker;
     // broker username and password
     @SerializedName(value = "brokerProperties")
-    private Map<String, String> brokerProperties;
+    protected Map<String, String> brokerProperties;
     @SerializedName(value = "hasBroker")
-    private boolean hasBroker;
+    protected boolean hasBroker;
 
     public SparkResource(String name) {
-        this(name, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
+        this(name, ResourceType.SPARK, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
     }
 
-    private SparkResource(String name, Map<String, String> sparkConfigs, String workingDir, String broker,
-                          Map<String, String> brokerProperties, boolean hasBroker) {
-        super(name, ResourceType.SPARK);
+    protected SparkResource(String name, ResourceType type, Map<String, String> sparkConfigs, String workingDir,
+                            String broker, Map<String, String> brokerProperties, boolean hasBroker) {
+        super(name, type);
         this.sparkConfigs = sparkConfigs;
         this.workingDir = workingDir;
         this.broker = broker;
@@ -195,7 +195,8 @@ public class SparkResource extends Resource {
     }
 
     public SparkResource getCopiedResource() {
-        return new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker, brokerProperties, hasBroker);
+        return new SparkResource(name, ResourceType.SPARK, Maps.newHashMap(sparkConfigs), workingDir, broker,
+                brokerProperties, hasBroker);
     }
 
     // Each SparkResource has and only has one SparkRepository.
@@ -242,6 +243,10 @@ public class SparkResource extends Resource {
 
     public boolean isYarnMaster() {
         return getMaster().equalsIgnoreCase(YARN_MASTER);
+    }
+
+    public boolean isLivyMode() {
+        return false;
     }
 
     public void update(ResourceDesc resourceDesc) throws DdlException {
@@ -341,7 +346,7 @@ public class SparkResource extends Resource {
         brokerProperties = getBrokerProperties(properties);
     }
 
-    private Map<String, String> getSparkConfig(Map<String, String> properties) {
+    protected Map<String, String> getSparkConfig(Map<String, String> properties) {
         Map<String, String> sparkConfig = Maps.newHashMap();
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             if (entry.getKey().startsWith(SPARK_CONFIG_PREFIX)) {
@@ -361,7 +366,7 @@ public class SparkResource extends Resource {
         return sparkConfig;
     }
 
-    private Map<String, String> getBrokerProperties(Map<String, String> properties) {
+    protected Map<String, String> getBrokerProperties(Map<String, String> properties) {
         Map<String, String> brokerProperties = Maps.newHashMap();
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             if (entry.getKey().startsWith(BROKER_PROPERTY_PREFIX)) {

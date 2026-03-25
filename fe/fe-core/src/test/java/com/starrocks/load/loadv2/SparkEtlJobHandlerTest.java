@@ -38,6 +38,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.BrokerMgr;
 import com.starrocks.catalog.FsBroker;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
@@ -481,6 +482,107 @@ public class SparkEtlJobHandlerTest {
             Assertions.assertTrue(filePathToSize.containsKey(filePath));
             Assertions.assertEquals(10, (long) filePathToSize.get(filePath));
         }
+    }
+
+    // ==================== Livy mode tests ====================
+
+    @Test
+    public void testLivySubmitEtlJob(@Mocked BrokerUtil brokerUtil) throws LoadException {
+        LivyBatchResponse mockResponse = new LivyBatchResponse();
+        mockResponse.setId(42);
+        mockResponse.setState("starting");
+
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse submitBatch(Object requestBody) {
+                return mockResponse;
+            }
+        };
+
+        EtlJobConfig etlJobConfig = new EtlJobConfig(Maps.newHashMap(), etlOutputPath, label, null);
+        LivyResource resource = new LivyResource(resourceName);
+        new Expectations(resource) {
+            {
+                resource.prepareArchive();
+                result = archive;
+                resource.getLivyUrl();
+                result = "http://livy:8998";
+                resource.getWorkingDir();
+                result = "hdfs://127.0.0.1:10000/tmp/starrocks";
+            }
+        };
+
+        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
+        SparkLoadAppHandle handle = new SparkLoadAppHandle();
+        SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
+        SparkEtlJobHandler handler = new SparkEtlJobHandler();
+        long sparkLoadSubmitTimeout = Config.spark_load_submit_timeout_second;
+        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, handle, attachment,
+                sparkLoadSubmitTimeout);
+
+        Assertions.assertEquals("42", attachment.getAppId());
+    }
+
+    @Test
+    public void testLivyGetEtlJobStatus(@Mocked BrokerUtil brokerUtil) throws StarRocksException {
+        LivyBatchResponse mockResponse = new LivyBatchResponse();
+        mockResponse.setId(42);
+        mockResponse.setState("running");
+        mockResponse.setAppId("application_123_001");
+        mockResponse.setAppInfo(Maps.newHashMap());
+        mockResponse.getAppInfo().put("sparkUiUrl", "http://spark-ui:4040");
+
+        new MockUp<LivyClient>() {
+            @Mock
+            public LivyBatchResponse getBatchStatus(int batchId) {
+                return mockResponse;
+            }
+        };
+
+        LivyResource resource = new LivyResource(resourceName);
+        new Expectations(resource) {
+            {
+                resource.getLivyUrl();
+                result = "http://livy:8998";
+            }
+        };
+
+        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
+        SparkEtlJobHandler handler = new SparkEtlJobHandler();
+        EtlStatus status = handler.getEtlJobStatus(null, "42", loadJobId, etlOutputPath, resource, brokerDesc);
+        Assertions.assertEquals(TEtlState.RUNNING, status.getState());
+        Assertions.assertEquals("http://spark-ui:4040", status.getTrackingUrl());
+    }
+
+    @Test
+    public void testLivyKillEtlJob() throws StarRocksException {
+        new MockUp<LivyClient>() {
+            @Mock
+            public void deleteBatch(int batchId) {
+            }
+        };
+
+        LivyResource resource = new LivyResource(resourceName);
+        new Expectations(resource) {
+            {
+                resource.getLivyUrl();
+                result = "http://livy:8998";
+            }
+        };
+
+        SparkEtlJobHandler handler = new SparkEtlJobHandler();
+        handler.killEtlJob(null, "42", loadJobId, resource);
+    }
+
+    @Test
+    public void testCreateSubmitterRouting() {
+        SparkEtlJobHandler handler = new SparkEtlJobHandler();
+
+        SparkResource yarnResource = new SparkResource("spark_yarn");
+        Assertions.assertInstanceOf(YarnSparkSubmitter.class, handler.createSubmitter(yarnResource));
+
+        LivyResource livyResource = new LivyResource("spark_livy");
+        Assertions.assertInstanceOf(LivySparkSubmitter.class, handler.createSubmitter(livyResource));
     }
 
     @Test

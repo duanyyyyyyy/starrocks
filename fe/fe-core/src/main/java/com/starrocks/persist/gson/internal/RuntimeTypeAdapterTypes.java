@@ -84,6 +84,7 @@ import com.starrocks.catalog.JDBCResource;
 import com.starrocks.catalog.JDBCTable;
 import com.starrocks.catalog.LargeIntVariant;
 import com.starrocks.catalog.ListPartitionInfo;
+import com.starrocks.catalog.LivyResource;
 import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MysqlTable;
@@ -221,6 +222,7 @@ public class RuntimeTypeAdapterTypes {
         final RuntimeTypeAdapterFactory<Resource> resource_type_adapter_factory = RuntimeTypeAdapterFactory
                 .of(Resource.class, "clazz")
                 .registerSubtype(SparkResource.class, "SparkResource")
+                .registerSubtype(LivyResource.class, "LivyResource")
                 .registerSubtype(HiveResource.class, "HiveResource")
                 .registerSubtype(IcebergResource.class, "IcebergResource")
                 .registerSubtype(HudiResource.class, "HudiResource")
