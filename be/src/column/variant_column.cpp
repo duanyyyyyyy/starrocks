@@ -551,6 +551,31 @@ void VariantColumn::assign(size_t n, size_t idx) {
     }
 }
 
+void VariantColumn::remove_first_n_values(size_t count) {
+    const size_t rows = size();
+    DCHECK_LE(count, rows);
+    if (count == 0) {
+        return;
+    }
+    if (count == rows) {
+        resize(0);
+        DCHECK(_is_shredded_row_aligned());
+        return;
+    }
+
+    if (_metadata_column != nullptr) {
+        DCHECK(_remain_value_column != nullptr);
+        _metadata_column->remove_first_n_values(count);
+        _remain_value_column->remove_first_n_values(count);
+    } else {
+        DCHECK(_remain_value_column == nullptr);
+    }
+    for (auto& col : _typed_columns) {
+        col->remove_first_n_values(count);
+    }
+    DCHECK(_is_shredded_row_aligned());
+}
+
 size_t VariantColumn::filter_range(const Filter& filter, size_t from, size_t to) {
     // metadata and remain are always both present or both absent (schema invariant).
     // Do not initialize with (to - from): typed-only VariantColumn (for example,

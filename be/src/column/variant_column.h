@@ -102,6 +102,7 @@ public:
     size_t byte_size(size_t from, size_t size) const override;
     void resize(size_t n) override;
     void assign(size_t n, size_t idx) override;
+    void remove_first_n_values(size_t count) override;
     size_t filter_range(const Filter& filter, size_t from, size_t to) override;
     int compare_at(size_t left, size_t right, const Column& rhs, int nan_direction_hint) const override;
     int equals(size_t left, const Column& rhs, size_t right, bool safe_eq = true) const override;
