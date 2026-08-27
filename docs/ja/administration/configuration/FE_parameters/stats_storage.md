@@ -270,7 +270,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ### `enable_online_optimize_table`
 
-- デフォルト：true
+- デフォルト：false
 - タイプ：Boolean
 - 単位：-
 - 変更可能：Yes
@@ -569,8 +569,17 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - タイプ：Boolean
 - 単位：-
 - 変更可能：Yes
-- 説明：テーブルまたはマテリアライズドビューを `DISTRIBUTED BY` 句なしで作成する場合に、Range-based Distribution セマンティクスをデフォルトのテーブル分散方法として使用するかどうか。この設定は共有データモードでのみ有効であり、共有なしモードでは効果がありません。`false` に設定すると、このデフォルト動作が無効になり、そのようなテーブルは代わりに従来のデフォルト分散動作を使用します（PRIMARY KEY テーブルはデフォルトで hash、DUPLICATE KEY テーブルは random となり、AGGREGATE KEY または UNIQUE KEY テーブルは明示的な `DISTRIBUTED BY` 句が必要です）。
+- 説明：テーブルを `DISTRIBUTED BY` 句なしで作成する場合に、Range-based Distribution セマンティクスをデフォルトのテーブル分散方法として使用するかどうか。この設定は共有データモードでのみ有効であり、共有なしモードでは効果がありません。`false` に設定すると、このデフォルト動作が無効になり、そのようなテーブルは代わりに従来のデフォルト分散動作を使用します（PRIMARY KEY テーブルはデフォルトで hash、DUPLICATE KEY テーブルは random となり、AGGREGATE KEY または UNIQUE KEY テーブルは明示的な `DISTRIBUTED BY` 句が必要です）。`DISTRIBUTED BY` 句なしで作成されたマテリアライズドビューにはさらに `enable_mv_range_distribution` が必要です。
 - 導入時期：v4.1.0
+
+### `enable_mv_range_distribution`
+
+- デフォルト：false
+- タイプ：Boolean
+- 単位：-
+- 変更可能：Yes
+- 説明：非同期マテリアライズドビューを `DISTRIBUTED BY` 句なしで作成する場合に、Range-based Distribution セマンティクスをデフォルトの分散方法として使用するかどうか。この設定はテーブルには影響しません。この設定と `enable_range_distribution` の両方が `true` で、かつ共有データモードである場合にのみ、デフォルトで Range-based Distribution セマンティクスが選択されます。それ以外の場合、テーブルが range 分散になる環境であっても、マテリアライズドビューは従来のデフォルト分散動作（増分維持されるマテリアライズドビューはキー列による hash、それ以外は random）を使用します。
+- 導入時期：v4.2.0
 
 ### `tablet_reshard_max_parallel_tablets`
 
@@ -598,6 +607,33 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 変更可能：Yes
 - 説明：古いタブレットを分割できる新しいタブレットの最大数。
 - 導入時期：v4.1.0
+
+### `tablet_reshard_orderby_max_split_count`
+
+- デフォルト：2
+- タイプ：Int
+- 単位：-
+- 変更可能：Yes
+- 説明：分割が完全な UNSHARE 再書き込みを伴う場合、つまり `ORDER BY` キーが主キーと異なる range 分散 PRIMARY KEY テーブルの場合に、1 つのソースタブレットが分割される新しいタブレットの最大数。この種の分割では親の共有セグメントを range でフィルタできないため、すべての子タブレットが丸ごと書き直され、ファンアウトが大きいほど読み取りの増幅が倍増します。さらに `tablet_reshard_max_split_count` によって制限されます。`1` 以下の値ではこの追加の制限が無効になります。
+- 導入時期：-
+
+### `tablet_reshard_orderby_max_split_tablets_per_job`
+
+- デフォルト：0
+- タイプ：Int
+- 単位：-
+- 変更可能：Yes
+- 説明：分割が完全な UNSHARE 再書き込みを伴う場合に、1 つの分割ジョブが**分割**できるソースタブレットの最大数。最大のタブレットが優先的に選択されます。これが制限するのは分割のファンアウトであり、再書き込み量ではない点に注意してください。分割されなかった兄弟タブレットも置き換え後のインデックスでは identical タブレットとなり、UNSHARE コンパクションはパーティション単位で実行されるため、それらも書き直されます。`0` 以下の値はウェアハウスのコンピュートノード数を意味します。
+- 導入時期：-
+
+### `tablet_reshard_orderby_split_interval_second`
+
+- デフォルト：180
+- タイプ：Int
+- 単位：秒
+- 変更可能：Yes
+- 説明：分割が完全な UNSHARE 再書き込みを伴うテーブルについて、直前の tablet reshard ジョブが完了してから自動分割が再度トリガーされるまでの待機期間。コンパクションスロットが占有されている間に蓄積した小さなファイルを size-tiered コンパクションが処理するための時間を確保します。`0` 以下の値では待機が無効になります。この間隔は直前のジョブが保持されている間、つまり最長で `tablet_reshard_history_job_keep_max_ms` までしか適用できない点に注意してください。
+- 導入時期：-
 
 ### `tablet_reshard_min_split_size`
 

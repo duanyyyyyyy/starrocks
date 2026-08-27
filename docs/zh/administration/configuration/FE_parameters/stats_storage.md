@@ -270,7 +270,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ### `enable_online_optimize_table`
 
-- 默认值: true
+- 默认值: false
 - 类型: Boolean
 - 单位: -
 - 是否可变: Yes
@@ -569,8 +569,17 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 类型: Boolean
 - 单位: -
 - 是否可变: Yes
-- 描述: 在创建表或物化视图时未指定 `DISTRIBUTED BY` 子句的情况下，是否将 Range-based Distribution 语意作为默认的表数据分布方式。该配置仅在存算分离模式下生效，在存算一体模式下无效。设置为 `false` 可禁用该默认行为，此时这类表将改用此前的默认分布行为（PRIMARY KEY 表默认使用 hash 分布，DUPLICATE KEY 表默认使用 random 分布，AGGREGATE KEY 或 UNIQUE KEY 表则必须显式指定 `DISTRIBUTED BY` 子句）。
+- 描述: 在创建表时未指定 `DISTRIBUTED BY` 子句的情况下，是否将 Range-based Distribution 语意作为默认的表数据分布方式。该配置仅在存算分离模式下生效，在存算一体模式下无效。设置为 `false` 可禁用该默认行为，此时这类表将改用此前的默认分布行为（PRIMARY KEY 表默认使用 hash 分布，DUPLICATE KEY 表默认使用 random 分布，AGGREGATE KEY 或 UNIQUE KEY 表则必须显式指定 `DISTRIBUTED BY` 子句）。未指定 `DISTRIBUTED BY` 子句的物化视图还需同时启用 `enable_mv_range_distribution`。
 - 引入版本: v4.1.0
+
+### `enable_mv_range_distribution`
+
+- 默认值: false
+- 类型: Boolean
+- 单位: -
+- 是否可变: Yes
+- 描述: 在创建异步物化视图时未指定 `DISTRIBUTED BY` 子句的情况下，是否将 Range-based Distribution 语意作为默认的数据分布方式。该配置不影响表。仅当该配置与 `enable_range_distribution` 同时为 `true` 且处于存算分离模式时，默认分布才会选择 Range-based Distribution 语意；否则物化视图使用此前的默认分布行为（增量维护的物化视图默认按其 Key 列使用 hash 分布，其他物化视图默认使用 random 分布），即使同一集群中的表会使用 Range 分布。
+- 引入版本: v4.2.0
 
 ### `tablet_reshard_max_parallel_tablets`
 
@@ -598,6 +607,33 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 是否可变: Yes
 - 描述: 旧 Tablet 最多可分割成多少个新 Tablet。
 - 引入版本: v4.1.0
+
+### `tablet_reshard_orderby_max_split_count`
+
+- 默认值: 2
+- 类型: Int
+- 单位: -
+- 是否可变: Yes
+- 描述: 当分裂会附带一次完整的 UNSHARE 重写时（即 Range 分布的主键表，其 `ORDER BY` 键与主键不同），单个源 Tablet 最多可分裂成的新 Tablet 数量。此类分裂无法对父 Tablet 的共享 Segment 做 Range 过滤，每个子 Tablet 都会被整体重写，因此过大的扇出会成倍放大读放大。该值还会被 `tablet_reshard_max_split_count` 进一步限制。取值小于或等于 `1` 时禁用该额外限制。
+- 引入版本: -
+
+### `tablet_reshard_orderby_max_split_tablets_per_job`
+
+- 默认值: 0
+- 类型: Int
+- 单位: -
+- 是否可变: Yes
+- 描述: 当分裂会附带一次完整的 UNSHARE 重写时，单个分裂任务最多可**分裂**的源 Tablet 数量。优先选择最大的 Tablet。注意该值限制的是分裂扇出而非重写量：未被分裂的兄弟 Tablet 仍会在新索引中成为 Identical Tablet，而 UNSHARE Compaction 是分区级的，因此这些 Tablet 同样会被重写。取值小于或等于 `0` 时表示使用该 Warehouse 的计算节点数量。
+- 引入版本: -
+
+### `tablet_reshard_orderby_split_interval_second`
+
+- 默认值: 180
+- 类型: Int
+- 单位: 秒
+- 是否可变: Yes
+- 描述: 对于分裂会附带完整 UNSHARE 重写的表，上一个 Tablet Reshard 任务完成后，自动分裂再次触发前的静默期。用于给 Size-tiered Compaction 留出窗口，清理占用 Compaction 槽位期间累积的小文件。取值小于或等于 `0` 时禁用等待。注意该间隔仅在上一个任务仍被保留期间生效，即最长不超过 `tablet_reshard_history_job_keep_max_ms`。
+- 引入版本: -
 
 ### `tablet_reshard_min_split_size`
 
