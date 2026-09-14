@@ -22,6 +22,7 @@
 #include <set>
 #include <unordered_map>
 
+#include "base/debug/trace.h"
 #include "base/hash/crc32c.h"
 #include "base/testutil/assert.h"
 #include "base/testutil/id_generator.h"
@@ -475,6 +476,36 @@ TEST_F(MetaFileTest, test_compacted_delvec_absent_size_cache_and_reader_lifecycl
     expect_compacted_delvec_rejected({a}, RejectionStatus::kInvalidArgument,
                                      "compacted delvec resolved source size does not contain page", 1, 1,
                                      configure_resolved_size(0));
+}
+
+TEST_F(MetaFileTest, test_compacted_delvec_absent_size_preflight_is_traced) {
+    const int64_t source_tablet = next_id();
+    const std::string source_name = "absent-size-traced.delvec";
+    write_file(_tablet_manager->delvec_location(source_tablet, source_name), "a");
+    const auto raw = raw_output_page(source_tablet, source_name, 0, 1);
+
+    auto* sync = SyncPoint::GetInstance();
+    sync->ClearAllCallBacks();
+    sync->DisableProcessing();
+    sync->SetCallBack("write_compacted_delvec_pages:source_size_override", [](void* arg) {
+        *static_cast<std::optional<StatusOr<int64_t>>*>(arg) = Status::InternalError("injected size failure");
+    });
+    sync->EnableProcessing();
+    DeferOp cleanup([&] {
+        sync->ClearAllCallBacks();
+        sync->DisableProcessing();
+    });
+
+    scoped_refptr<Trace> trace(new Trace);
+    Status status;
+    {
+        ADOPT_TRACE(trace.get());
+        FileMetaPB output;
+        std::vector<uint64_t> offsets;
+        status = write_compacted_delvec_pages(_tablet_manager.get(), {raw}, next_id(), next_id(), &output, &offsets);
+    }
+    EXPECT_EQ("injected size failure", status.message()) << status;
+    EXPECT_NE(std::string::npos, trace->MetricsAsJSON().find("delvec_file_read_latency_us"));
 }
 
 TEST_F(MetaFileTest, test_compacted_delvec_reader_lifecycle_resets_across_serialized_page) {
@@ -2379,7 +2410,8 @@ TEST_F(MetaFileTest, test_remove_compacted_sst_skip_reused_sst) {
     EXPECT_TRUE(orphan_names.count("reused.sst") == 0);
 }
 
-// Test that remove_compacted_sst also handles output_sstable (singular, from major_compact)
+// Test that remove_compacted_sst also handles output_sstable (singular), which only appears in
+// txn logs written before index compaction moved to the plural output_sstables field.
 TEST_F(MetaFileTest, test_remove_compacted_sst_skip_reused_sst_singular_output) {
     const int64_t tablet_id = 10011;
     auto tablet = std::make_shared<Tablet>(_tablet_manager.get(), tablet_id);
