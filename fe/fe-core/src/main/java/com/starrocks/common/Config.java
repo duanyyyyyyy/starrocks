@@ -205,6 +205,9 @@ public class Config extends ConfigBase {
     public static int audit_log_delete_count = -1;
     @ConfField(mutable = true)
     public static boolean audit_log_json_format = false;
+    @ConfField(mutable = true, comment = "Max length of the error message recorded in the audit log, truncate " +
+            "messages longer than this specified limit. Set to 0 to stop recording error messages. Default: 1024")
+    public static int audit_log_error_message_max_length = 1024;
     @ConfField
     public static boolean audit_log_enable_compress = false;
 
@@ -1595,6 +1598,16 @@ public class Config extends ConfigBase {
     public static int alter_table_timeout_second = 86400; // 1day
 
     /**
+     * On an aggregate table, ALTER TABLE ... ADD COLUMN with neither an aggregate function nor the
+     * KEY keyword is ambiguous, and treating it as a key column changes the table's aggregation key
+     * and rewrites existing data. When false, such a statement is rejected and the error names both
+     * options. When true, the column becomes a key column, which is the behavior before this was
+     * introduced. Mutable, but not persisted across a restart unless set WITH PERSISTENT.
+     */
+    @ConfField(mutable = true)
+    public static boolean allow_implicit_key_column_in_agg_add_column = true;
+
+    /**
      * The alter handler max worker threads
      */
     @ConfField
@@ -2742,6 +2755,13 @@ public class Config extends ConfigBase {
             "disable the count check while keeping the guard enabled.")
     public static int dict_thrash_guard_threshold = 5;
 
+    @ConfField(mutable = true, comment = "Minimum interval, in seconds, between two min/max statistics " +
+            "collections for the same column. Min/max stats are collected on demand via a [_META_] " +
+            "MetaScan that reads every segment's zone-map metadata; a frequently loaded column would " +
+            "otherwise re-scan on every load. Within the interval the min/max optimization is skipped " +
+            "rather than re-collected (a stale value is never served). Set to 0 to disable throttling.")
+    public static int min_max_stats_collect_interval_sec = 60;
+
     /**
      * The column statistic cache update interval
      */
@@ -2916,9 +2936,6 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static String histogram_collect_bucket_ndv_mode = "none";
-
-    @ConfField(mutable = true, comment = "Whether to batch insert histogram statistics for multiple columns")
-    public static boolean enable_batch_insert_histogram_statistics = true;
 
     @ConfField(mutable = true, comment = "Maximum buffered SQL size in bytes for one histogram statistics batch insert")
     public static long histogram_batch_insert_buffer_size = 20L * 1024 * 1024;
@@ -3868,6 +3885,23 @@ public class Config extends ConfigBase {
                     "placed for the sample to be representative, so the scheduler discards it and " +
                     "falls back to a full scan. Lower is more conservative. Default: 40")
     public static int lake_scheduler_colocate_group_sample_empty_fallback_percent = 40;
+
+    @ConfField(mutable = true, comment =
+            "How long a shared-data online rewrite keeps retrying one partition's rewrite INSERT after " +
+                    "it fails, before cancelling the whole job. An online rewrite - a range sort-key " +
+                    "schema change, a range rollup, or a materialized view sort-key rewrite - rebuilds " +
+                    "data one partition per alter-scheduler tick, so a compute node restarting or " +
+                    "crashing mid-INSERT fails that one partition; retrying lets the job resume it " +
+                    "instead of discarding every partition it has already rewritten. Should exceed the " +
+                    "time a node takes to come back, and stays far below alter_table_timeout_second " +
+                    "because compaction on the table is deferred for as long as the rewrite runs. It " +
+                    "is spent only by that partition's own failed attempts, each charged for how long " +
+                    "it ran plus one alter_scheduler_interval_millisecond, so waiting on a different " +
+                    "partition does not consume it. A partition always gets at least one retry, even " +
+                    "when that attempt alone costs more than the window. Set to 0 to cancel the job on " +
+                    "the first failure. " +
+                    "Default: 600")
+    public static int lake_online_rewrite_partition_retry_timeout_second = 600;
 
     /**
      * Default lake compaction txn timeout
