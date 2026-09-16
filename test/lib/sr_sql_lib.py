@@ -3182,6 +3182,32 @@ out.append("${{dictMgr.NO_DICT_STRING_COLUMNS.contains(cid)}}")
         else:
             tools.assert_true(False, "wait compaction timeout")
 
+    def wait_compaction_committed(self, table_name: str, version_before, timeout: int = 60):
+        """Block until a compaction of `table_name` commits, i.e. until the tablet's visible
+        version moves past `version_before`.
+
+        `ALTER TABLE ... COMPACT` is fire-and-forget on shared-data tables: CompactionHandler only
+        raises the partition's priority to MANUAL_COMPACT and returns, CompactionScheduler
+        dispatches it on a 1s loop, and the CN runs it asynchronously. SQL exposes no synchronous
+        completion signal, which is why these cases used to sleep a fixed 30s -- pure wall clock
+        when compaction is quick, and still not enough when it is not.
+        """
+        sql = (
+            "SELECT MAX(t.MAX_VERSION) FROM information_schema.be_tablets t, "
+            "information_schema.tables_config c "
+            "WHERE t.TABLE_ID = c.TABLE_ID AND c.TABLE_NAME = '%s' "
+            "AND c.TABLE_SCHEMA = DATABASE()" % table_name
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.execute_sql(sql, True)
+            tools.assert_true(res["status"], f'Fail to read MAX_VERSION, error=[{res["msg"]}]')
+            rows = list(res["result"])
+            if rows and rows[0][0] is not None and int(rows[0][0]) > int(version_before):
+                return
+            time.sleep(0.5)
+        tools.assert_true(False, "compaction of %s did not commit within %ss" % (table_name, timeout))
+
     def _get_backend_http_endpoints(self) -> List[Dict]:
         """Get the http host and port of all the backends.
 
@@ -4153,3 +4179,23 @@ out.append("${{dictMgr.NO_DICT_STRING_COLUMNS.contains(cid)}}")
             log.info(f"Set tablet_id = {self.tablet_id}")
         else:
             raise Exception(f"Failed to get tablet ID for table {table_name}")
+
+    def wait_reshard_job_finish(self, table_name, job_type, expect_count, timeout_sec=60):
+        """
+        Wait until at least expect_count reshard jobs of job_type have FINISHED for the table.
+        The scan is scoped to the current database because tablet_reshard_jobs is cluster-wide.
+        """
+        sql = (
+            "SELECT count(*) FROM INFORMATION_SCHEMA.tablet_reshard_jobs WHERE DB_NAME = database()"
+            f" AND TABLE_NAME = '{table_name}' AND JOB_TYPE = '{job_type}' AND JOB_STATE = 'FINISHED'"
+        )
+        begin_time = time.time()
+        while time.time() - begin_time < timeout_sec:
+            result = self.execute_sql(sql, True)
+            if result["status"] and len(result["result"]) > 0 and int(result["result"][0][0]) >= expect_count:
+                return
+            time.sleep(1)
+        tools.assert_true(
+            False,
+            f"wait {job_type} job of {table_name} error, expect {expect_count} finished job(s) in {timeout_sec}s",
+        )
