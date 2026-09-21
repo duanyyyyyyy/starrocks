@@ -252,6 +252,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 描述：bRPC 最大的包容量。
 - 引入版本：-
 
+### brpc_max_connection_pool_size
+
+- 默认值：100
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 描述：客户端为每个远程服务器端点缓存的空闲连接数。仅在 `brpc_connection_type` 为 `"pooled"` 时生效。该值是空闲连接缓存的容量，而非连接数上限：没有空闲连接可用时总是会新建连接，归还连接时若池中已有该数量的连接则将其关闭。若该值低于对单个对端的在途 RPC 峰值，超出的部分会被反复建立和关闭，效果类似短连接，并消耗临时端口，因此建议不低于该峰值。增大该值会增加文件描述符数量以及空闲连接占用的内存。取值为 `0` 或负数时将禁用连接复用，此时 `"pooled"` 的行为等同于 `"short"`。修改该值立即生效，且仅影响此后归还的连接。
+- 引入版本：v4.2.0
+
 ### brpc_max_connections_per_server
 
 - 默认值：1
@@ -431,6 +440,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 是否动态：是（仅部分选项）
 - 描述：BE 以普通模式启动时，由 `bin/start_backend.sh` 导出为 `JEMALLOC_CONF` 环境变量的 jemalloc 运行时选项。如果环境中已经设置了 `JEMALLOC_CONF`，或者 BE 以 `--jemalloc_debug`、`--check_mem_leak` 方式启动（这两种模式会强制使用各自的选项），则该配置项不生效。由于 jemalloc 在 BE 解析配置之前就已经读取了 `JEMALLOC_CONF`，运行时修改该配置项只会重新应用 jemalloc 本身允许在初始化之后修改的选项，即 `dirty_decay_ms`、`muzzy_decay_ms` 和 `prof_active`。新增、删除或修改其他任何选项都会报错并回滚配置值，这些选项只能通过重启 BE 生效。只有 BE 启动时带 `prof:true` 才能修改 `prof_active`。将 `dirty_decay_ms` 或 `muzzy_decay_ms` 设置为 `0` 会同步清理所有未使用的页面，本次修改可能因此耗时较长；设置为 `-1` 表示禁用清理。
 - 引入版本：v4.0.15, v4.1.3
+
+### large_memory_alloc_report_threshold
+
+- 默认值：1073741824
+- 类型：Int
+- 单位：Bytes
+- 是否动态：是
+- 描述：当单次内存分配请求的字节数超过该值时，BE 会打印一条 WARNING 日志，包含 Query ID、Fragment Instance ID、申请大小以及分配处的堆栈。设置为 `0` 或负数表示关闭该日志。阈值判断位于每次内存分配的路径上，但仅是一次比较，开销可忽略；真正昂贵的是日志本身，它需要抓取并解析堆栈并占用日志锁。因此，如果阈值低到普通分配也会触发，会产生海量日志并拖慢整个进程。仅在排查异常内存上涨时临时调低，排查完成后恢复。该默认值在 BE 配置加载完成后才生效，进程启动更早阶段的分配不会被记录。
+- 引入版本：v4.2.0
 
 ### local_library_dir
 
