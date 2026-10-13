@@ -684,6 +684,17 @@ public class Config extends ConfigBase {
     public static int history_job_keep_max_second = 7 * 24 * 3600; // 7 days
 
     /**
+     * The max number of finished or cancelled alter jobs kept per alter handler (schema change and
+     * optimize jobs share one budget, rollup jobs have another). Beyond it, the jobs that finished
+     * earliest are removed first, regardless of {@link #history_job_keep_max_second}. A job is kept
+     * while a running transaction may still be bound to its history schema or, in shared-data mode,
+     * while a cluster snapshot still needs it, so the count can temporarily exceed this limit.
+     * A value <= 0 disables the limit.
+     */
+    @ConfField(mutable = true)
+    public static int history_job_keep_max_num = 1000;
+
+    /**
      * the transaction will be cleaned after transaction_clean_interval_second seconds if the transaction is visible or aborted
      * we should make this interval as short as possible and each clean cycle as soon as possible
      */
@@ -2539,7 +2550,7 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "ldap ssl trust store file path, supports perm and jks formats")
     public static String authentication_ldap_simple_ssl_conn_trust_store_path = "";
 
-    @ConfField(mutable = true, comment = "LDAP SSL trust store file password; " +
+    @ConfField(mutable = true, sensitive = true, comment = "LDAP SSL trust store file password; " +
             "no password is required for files in PEM format.")
     public static String authentication_ldap_simple_ssl_conn_trust_store_pwd = "";
 
@@ -2564,7 +2575,7 @@ public class Config extends ConfigBase {
     /**
      * the root DN password to search users for authentication_ldap_simple
      */
-    @ConfField(mutable = true)
+    @ConfField(mutable = true, sensitive = true)
     public static String authentication_ldap_simple_bind_root_pwd = "";
 
     /**
@@ -2626,7 +2637,7 @@ public class Config extends ConfigBase {
     /**
      * Cluster token used for internal authentication.
      */
-    @ConfField
+    @ConfField(sensitive = true)
     public static String auth_token = "";
 
     /**
@@ -3670,7 +3681,7 @@ public class Config extends ConfigBase {
      * set this to enable Transparent Data Encryption(TDE)
      * once set, should not be changed, or the data depending on this key cannot be read anymore
      */
-    @ConfField(mutable = false)
+    @ConfField(mutable = false, sensitive = true)
     public static String default_master_key = "";
 
     /**
@@ -3758,9 +3769,9 @@ public class Config extends ConfigBase {
     @ConfField
     public static boolean aws_s3_use_instance_profile = false;
 
-    @ConfField
+    @ConfField(sensitive = true)
     public static String aws_s3_access_key = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String aws_s3_secret_key = "";
 
     @ConfField
@@ -3777,9 +3788,9 @@ public class Config extends ConfigBase {
     public static String azure_blob_endpoint = "";
     @ConfField
     public static String azure_blob_path = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String azure_blob_shared_key = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String azure_blob_sas_token = "";
 
     // azure adls2
@@ -3787,9 +3798,9 @@ public class Config extends ConfigBase {
     public static String azure_adls2_endpoint = "";
     @ConfField
     public static String azure_adls2_path = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String azure_adls2_shared_key = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String azure_adls2_sas_token = "";
     @ConfField
     public static boolean azure_adls2_oauth2_use_managed_identity = false;
@@ -3797,7 +3808,7 @@ public class Config extends ConfigBase {
     public static String azure_adls2_oauth2_tenant_id = "";
     @ConfField
     public static String azure_adls2_oauth2_client_id = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String azure_adls2_oauth2_client_secret = "";
     @ConfField(aliases = {"azure_adls2_oauth2_oauth2_client_endpoint"})
     public static String azure_adls2_oauth2_client_endpoint = "";
@@ -3812,11 +3823,11 @@ public class Config extends ConfigBase {
     public static String gcp_gcs_path = "";
     @ConfField
     public static String gcp_gcs_use_compute_engine_service_account = "true";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String gcp_gcs_service_account_email = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String gcp_gcs_service_account_private_key = "";
-    @ConfField
+    @ConfField(sensitive = true)
     public static String gcp_gcs_service_account_private_key_id = "";
     @ConfField
     public static String gcp_gcs_impersonation_service_account = "";
@@ -4236,6 +4247,16 @@ public class Config extends ConfigBase {
     public static int profile_info_reserved_num = 500;
 
     /**
+     * Upper bound, in bytes, of the off-heap buffers FE keeps for compressing query profiles and other payloads.
+     * Compressing between off-heap buffers keeps java.util.zip out of JNI critical sections, which otherwise hold
+     * the JVM's GC locker and can make allocations fail with a false OutOfMemoryError. A request that does not fit
+     * within this bound is compressed on-heap as before. Set to 0 to turn off-heap compression off: everything is then
+     * compressed on-heap, in short chunks, and buffers already allocated are dropped as they are returned.
+     */
+    @ConfField(mutable = true)
+    public static long offheap_deflate_buffer_pool_max_bytes = 128L * 1024 * 1024;
+
+    /**
      * Deprecated
      * Number of stream load profile infos reserved by `ProfileManager` for recently executed stream load and routine load task.
      * Default value: 500
@@ -4300,13 +4321,13 @@ public class Config extends ConfigBase {
     /**
      * the password of keystore file
      */
-    @ConfField
+    @ConfField(sensitive = true)
     public static String ssl_keystore_password = "";
 
     /**
      * the password of private key
      */
-    @ConfField
+    @ConfField(sensitive = true)
     public static String ssl_key_password = "";
 
     /**
@@ -4318,7 +4339,7 @@ public class Config extends ConfigBase {
     /**
      * the password of truststore file
      */
-    @ConfField
+    @ConfField(sensitive = true)
     public static String ssl_truststore_password = "";
 
     /**
@@ -4972,7 +4993,7 @@ public class Config extends ConfigBase {
     /**
      * The secret used to authorize StarRocks client with the authorization server.
      */
-    @ConfField(mutable = false)
+    @ConfField(mutable = false, sensitive = true)
     public static String oauth2_client_secret = "";
 
     /**

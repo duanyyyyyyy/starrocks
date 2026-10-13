@@ -40,6 +40,47 @@ This topic introduces the following types of BE configurations:
 
 ## Query
 
+### H3 resource limits
+
+These mutable positive BE settings limit one H3 function row. Exceeding a setting returns an error, not a partial result. See [H3 functions](../../../sql-reference/sql-functions/spatial-functions/h3-functions.md) for signatures and the center-fill model.
+
+#### h3_max_cells_per_row
+
+- Default: 100000
+- Is mutable: Yes
+- Limit: cells / pre-deduplication expansion slots.
+
+#### h3_max_grid_disk_k
+
+- Default: 128
+- Is mutable: Yes
+- Limit: grid steps.
+
+#### h3_max_polygon_vertices
+
+- Default: 10000
+- Is mutable: Yes
+- Limit: coordinate positions including ring closure.
+
+#### h3_max_polygon_components
+
+- Default: 256
+- Is mutable: Yes
+- Limit: polygon components including empty components.
+
+#### h3_max_working_bytes
+
+- Default: 67108864
+- Is mutable: Yes
+- Limit: bytes of per-worker preparation and temporary buffers.
+
+#### h3_max_estimated_work_per_row
+
+- Default: 10000000
+- Is mutable: Yes
+- Limit: sum of estimated slots times (component positions + 1).
+
+
 ### ai_function_request_timeout_ms
 
 - Default: 600000
@@ -784,6 +825,15 @@ This topic introduces the following types of BE configurations:
 - Is mutable: Yes
 - Description: The number of threads which the storage engine used for concurrent storage volume scanning. All threads are managed in the thread pool.
 - Introduced in: -
+
+### spill_max_dir_bytes_ratio
+
+- Default: 0.5
+- Type: Double
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum proportion of disk capacity that a spill directory (`spill_local_storage_dir`) can use when it is on the same disk as a storage path (`storage_root_path`). The default value `0.5` means intermediate result spilling can use up to 50% of that disk's capacity. A spill directory on a separate disk is not subject to this limit. This value is read when the BE starts, so a change takes effect only after a restart.
+- Introduced in: v3.2.0
 
 ### string_prefix_zonemap_prefix_len
 

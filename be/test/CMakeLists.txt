@@ -12,6 +12,7 @@ set(EXEC_FILES
         ./exec/pipeline/schedule/observer_test.cpp
         ./compute_env/spill/spill_observable_test.cpp
         ./exec/pipeline/spill_process_channel_test.cpp
+        ./exec/pipeline/hash_join_build_chunk_slicer_test.cpp
         ./exec/pipeline/block_reason_test.cpp
         ./exec/pipeline/spillable_sort_source_lockstep_test.cpp
         ./exec/pipeline/spillable_sort_observer_wakeup_test.cpp
@@ -32,6 +33,7 @@ set(EXEC_FILES
         ./exec/pipeline/enforce_unique_row_locator_operator_test.cpp
         ./exec/pipeline/analytic_node_pipeline_test.cpp
         ./exec/pipeline/local_bucket_shuffle_test.cpp
+        ./exec/pipeline/local_shuffle_alignment_test.cpp
         ./exec/pipeline/local_exchange_memory_test.cpp
         ./exec/pipeline/ordered_partition_exchanger_test.cpp
         ./exec/pipeline/mem_limited_chunk_queue_test.cpp
@@ -53,6 +55,7 @@ set(EXEC_FILES
         ./exec/hash_variant_test.cpp
         ./exec/pipeline/olap_scan_operator_test.cpp
         ./exec/analytor_test.cpp
+        ./exec/coverage_analytor_test.cpp
         ./exec/chunks_sorter_heap_sort_test.cpp
         ./exec/chunks_sorter_test.cpp
         ./exec/connector_scan_node_test.cpp
@@ -131,6 +134,7 @@ set(EXEC_FILES
         ./http/stop_be_action_test.cpp
         ./http/stream_load_test.cpp
         ./http/transaction_stream_load_test.cpp
+        ./http/update_config_action_redaction_test.cpp
         ./http/action/pprof_actions_test.cpp
         ./http/action/proc_profile_e2e_test.cpp
         ./io/s3_output_stream_test.cpp

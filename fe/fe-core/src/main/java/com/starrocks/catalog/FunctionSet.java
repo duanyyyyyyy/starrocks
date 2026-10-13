@@ -55,6 +55,7 @@ import com.starrocks.thrift.TAIModelSource;
 import com.starrocks.thrift.TFunctionBinaryType;
 import com.starrocks.type.AnyArrayType;
 import com.starrocks.type.AnyElementType;
+import com.starrocks.type.AnyGeometryType;
 import com.starrocks.type.AnyMapType;
 import com.starrocks.type.AnyStructType;
 import com.starrocks.type.ArrayType;
@@ -204,6 +205,18 @@ public class FunctionSet {
     public static final String ST_ASTEXT = "st_astext";
     public static final String ST_ASWKT = "st_aswkt";
     public static final String ST_CIRCLE = "st_circle";
+    public static final String ST_CENTROID = "st_centroid";
+    public static final String ST_BUFFER = "st_buffer";
+    public static final String ST_SIMPLIFY_PRESERVE_TOPOLOGY = "st_simplifypreservetopology";
+    public static final String ST_COVERAGE_SIMPLIFY = "st_coveragesimplify";
+    public static final String ST_INTERSECTION = "st_intersection";
+    public static final String ST_UNION = "st_union";
+    public static final String ST_DIFFERENCE = "st_difference";
+    public static final String ST_SYMDIFFERENCE = "st_symdifference";
+    public static final String H3_TOBOUNDARY = "h3_toboundary";
+    public static final String ST_SRID = "st_srid";
+    public static final String ST_SETSRID = "st_setsrid";
+    public static final String ST_TRANSFORM = "st_transform";
     public static final String ST_CONTAINS = "st_contains";
     public static final String ST_DISTANCE_SPHERE = "st_distance_sphere";
     public static final String ST_GEOMETRYFROMTEXT = "st_geometryfromtext";
@@ -294,6 +307,7 @@ public class FunctionSet {
     // Variant functions:
     public static final String VARIANT_QUERY = "variant_query";
     public static final String VARIANT_TYPEOF = "variant_typeof";
+    public static final String IS_VARIANT_NULL = "is_variant_null";
     public static final String GET_VARIANT_BOOL = "get_variant_bool";
     public static final String GET_VARIANT_INT = "get_variant_int";
     public static final String GET_VARIANT_DOUBLE = "get_variant_double";
@@ -805,6 +819,7 @@ public class FunctionSet {
                     .add(FunctionSet.EXCHANGE_SPEED)
                     .add(FunctionSet.FIELD)
                     .add(FunctionSet.SPLIT_PART)
+                    .add(FunctionSet.IS_VARIANT_NULL)
                     .build();
 
     public static final Set<String> DECIMAL_ROUND_FUNCTIONS =
@@ -873,6 +888,7 @@ public class FunctionSet {
             .add(FunctionSet.LAST_VALUE)
             .add(FunctionSet.FIRST_VALUE_REWRITE)
             .add(FunctionSet.SESSION_NUMBER)
+            .add(FunctionSet.ST_COVERAGE_SIMPLIFY)
             .build();
 
     public static final Set<String> VARIANCE_FUNCTIONS = ImmutableSet.<String>builder()
@@ -1604,6 +1620,14 @@ public class FunctionSet {
                 IntegerType.INT, ArrayType.ARRAY_BIGINT, false, false, false));
 
         // analytic functions
+        Type coverageGeometry = AnyGeometryType.GEOMETRY;
+        AggregateFunction coverageTwo = AggregateFunction.createAnalyticBuiltin(ST_COVERAGE_SIMPLIFY,
+                Lists.newArrayList(coverageGeometry, FloatType.DOUBLE), coverageGeometry, VarbinaryType.VARBINARY);
+        addBuiltin(coverageTwo);
+        AggregateFunction coverageThree = AggregateFunction.createAnalyticBuiltin(ST_COVERAGE_SIMPLIFY,
+                Lists.newArrayList(coverageGeometry, FloatType.DOUBLE, BooleanType.BOOLEAN),
+                coverageGeometry, VarbinaryType.VARBINARY);
+        addBuiltin(coverageThree);
         // Rank
         addBuiltin(AggregateFunction.createAnalyticBuiltin(RANK,
                 Collections.emptyList(), IntegerType.BIGINT, VarbinaryType.VARBINARY));

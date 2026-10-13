@@ -15,6 +15,7 @@
 #include "exprs/geo_functions.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -31,8 +32,13 @@
 #include "column/geo_column.h"
 #include "column/nullable_column.h"
 #include "common/logging.h"
+#include "geo/geo_buffer.h"
+#include "geo/geo_measurements.h"
+#include "geo/geo_overlay.h"
+#include "geo/geo_topology_simplify.h"
 #include "geo/geo_types.h"
 #include "geo/wkb.h"
+#include "runtime/runtime_state.h"
 
 namespace starrocks {
 
@@ -906,6 +912,218 @@ StatusOr<MutableColumnPtr> create_geometry_result(FunctionContext* context) {
     return NullableColumn::create(std::move(data), NullColumn::create());
 }
 
+Status overlay_checkpoint(FunctionContext* context) {
+    if (context != nullptr && context->state() != nullptr) {
+        RETURN_IF_CANCELLED(context->state());
+        RETURN_IF_ERROR(context->state()->check_query_state("Polygon overlay"));
+        RETURN_IF_ERROR(context->state()->check_mem_limit("Polygon overlay"));
+    }
+    return Status::OK();
+}
+
+struct NativeGeoOverlayArgument {
+    bool constant = false;
+    Status status = Status::OK();
+    std::unique_ptr<PreparedGeoPolygon> polygon;
+};
+
+struct NativeGeoOverlayState {
+    std::array<NativeGeoOverlayArgument, 2> arguments;
+};
+
+StatusOr<const PreparedGeoPolygon*> overlay_polygon(const GeoInput& input, size_t row,
+                                                    const NativeGeoOverlayArgument* prepared,
+                                                    std::unique_ptr<PreparedGeoPolygon>* batch_constant,
+                                                    std::unique_ptr<PreparedGeoPolygon>* varying) {
+    if (prepared != nullptr && prepared->constant) {
+        RETURN_IF_ERROR(prepared->status);
+        return prepared->polygon.get();
+    }
+    auto* target = input.constant ? batch_constant : varying;
+    if (!input.constant || *target == nullptr) {
+        ASSIGN_OR_RETURN(*target, PreparedGeoPolygon::prepare(input.wkb(row)));
+    }
+    return target->get();
+}
+
+StatusOr<ColumnPtr> geo_overlay(FunctionContext* context, const Columns& columns, GeoOverlayKind kind) {
+    RETURN_IF_ERROR(overlay_checkpoint(context));
+    if (context == nullptr) return Status::InvalidArgument("Polygon overlay requires a function context");
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null() || columns[1]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto left, geo_input<TYPE_GEOMETRY>(columns[0]));
+    ASSIGN_OR_RETURN(auto right, geo_input<TYPE_GEOMETRY>(columns[1]));
+    if (!is_geo_compute_compatible(left.data->descriptor(), right.data->descriptor())) {
+        return Status::InvalidArgument("Polygon overlay requires compatible GEOMETRY CRS descriptors");
+    }
+    ASSIGN_OR_RETURN(auto result, create_geometry_result(context));
+    const auto* output =
+            down_cast<const GeoColumn*>(down_cast<const NullableColumn*>(result.get())->data_column().get());
+    if (!is_geo_compute_compatible(left.data->descriptor(), output->descriptor())) {
+        return Status::InvalidArgument("Polygon overlay return CRS does not match its inputs");
+    }
+    const auto* prepared = reinterpret_cast<const NativeGeoOverlayState*>(
+            context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::array<std::unique_ptr<PreparedGeoPolygon>, 2> batch_constants;
+    const bool constant = left.constant && right.constant;
+    const size_t rows = constant ? 1 : size;
+    for (size_t row = 0; row < rows; ++row) {
+        RETURN_IF_ERROR(overlay_checkpoint(context));
+        if (left.is_null(row) || right.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        std::array<std::unique_ptr<PreparedGeoPolygon>, 2> varying;
+        ASSIGN_OR_RETURN(const auto* a, overlay_polygon(left, row, prepared ? &prepared->arguments[0] : nullptr,
+                                                        &batch_constants[0], &varying[0]));
+        ASSIGN_OR_RETURN(const auto* b, overlay_polygon(right, row, prepared ? &prepared->arguments[1] : nullptr,
+                                                        &batch_constants[1], &varying[1]));
+        RETURN_IF_ERROR(overlay_checkpoint(context));
+        ASSIGN_OR_RETURN(auto geometry, a->overlay(*b, kind, [&]() { return overlay_checkpoint(context); }));
+        RETURN_IF_ERROR(overlay_checkpoint(context));
+        std::string wkb;
+        RETURN_IF_ERROR(WkbCodec::to_wkb(geometry, &wkb, WkbCoordinateSemantics::GEOMETRY_CARTESIAN));
+        result->append_datum(Datum(Slice(wkb)));
+        RETURN_IF_ERROR(overlay_checkpoint(context));
+    }
+    if (constant) return ConstColumn::create(std::move(result), size);
+    return result;
+}
+
+struct NativeGeoBufferState {
+    Status status = Status::OK();
+    std::unique_ptr<PreparedGeoBuffer> input;
+};
+
+Status buffer_checkpoint(FunctionContext* context) {
+    if (context != nullptr && context->state() != nullptr) {
+        RETURN_IF_CANCELLED(context->state());
+        RETURN_IF_ERROR(context->state()->check_query_state("ST_Buffer"));
+        RETURN_IF_ERROR(context->state()->check_mem_limit("ST_Buffer"));
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> geo_buffer(FunctionContext* context, const Columns& columns) {
+    if (context == nullptr || columns.size() != 2) {
+        return Status::InvalidArgument("ST_Buffer requires a context and two arguments");
+    }
+    RETURN_IF_ERROR(buffer_checkpoint(context));
+    const size_t size = columns[0]->size();
+    if (columns[1]->size() != size) return Status::InvalidArgument("ST_Buffer argument sizes differ");
+    if (columns[0]->only_null() || columns[1]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOMETRY>(columns[0]));
+    ASSIGN_OR_RETURN(auto result, create_geometry_result(context));
+    const auto* output =
+            down_cast<const GeoColumn*>(down_cast<const NullableColumn*>(result.get())->data_column().get());
+    if (!is_geo_compute_compatible(input.data->descriptor(), output->descriptor())) {
+        return Status::InvalidArgument("ST_Buffer return CRS does not match its input");
+    }
+    ColumnViewer<TYPE_DOUBLE> distances(columns[1]);
+    const auto* prepared =
+            reinterpret_cast<const NativeGeoBufferState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::unique_ptr<PreparedGeoBuffer> batch_constant;
+    const bool constant = input.constant && columns[1]->is_constant();
+    const size_t rows = constant && size != 0 ? 1 : size;
+    for (size_t row = 0; row < rows; ++row) {
+        RETURN_IF_ERROR(buffer_checkpoint(context));
+        if (input.is_null(row) || distances.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        const double distance = distances.value(row);
+        if (!std::isfinite(distance)) return Status::InvalidArgument("ST_Buffer requires a finite distance");
+        std::unique_ptr<PreparedGeoBuffer> varying;
+        const PreparedGeoBuffer* model;
+        if (prepared != nullptr) {
+            RETURN_IF_ERROR(prepared->status);
+            model = prepared->input.get();
+            if (model == nullptr) return Status::InvalidArgument("ST_Buffer constant geometry is NULL");
+        } else {
+            auto* target = input.constant ? &batch_constant : &varying;
+            if (!input.constant || *target == nullptr) {
+                ASSIGN_OR_RETURN(*target, PreparedGeoBuffer::prepare(input.wkb(row),
+                                                                     [&] { return buffer_checkpoint(context); }));
+            }
+            model = target->get();
+        }
+        ASSIGN_OR_RETURN(auto geometry, model->buffer(distance, [&] { return buffer_checkpoint(context); }));
+        std::string wkb;
+        RETURN_IF_ERROR(WkbCodec::to_wkb(geometry, &wkb, WkbCoordinateSemantics::GEOMETRY_CARTESIAN));
+        result->append_datum(Datum(Slice(wkb)));
+        RETURN_IF_ERROR(buffer_checkpoint(context));
+    }
+    if (constant && size != 0) return ConstColumn::create(std::move(result), size);
+    return result;
+}
+
+struct NativeGeoTopologySimplifyState {
+    Status status = Status::OK();
+    std::unique_ptr<PreparedGeoTopologySimplify> input;
+};
+
+Status simplify_checkpoint(FunctionContext* context) {
+    if (context != nullptr && context->state() != nullptr) {
+        RETURN_IF_CANCELLED(context->state());
+        RETURN_IF_ERROR(context->state()->check_query_state("ST_SimplifyPreserveTopology"));
+        RETURN_IF_ERROR(context->state()->check_mem_limit("ST_SimplifyPreserveTopology"));
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> geo_simplify(FunctionContext* context, const Columns& columns) {
+    if (context == nullptr || columns.size() != 2) {
+        return Status::InvalidArgument("ST_SimplifyPreserveTopology requires a context and two arguments");
+    }
+    RETURN_IF_ERROR(simplify_checkpoint(context));
+    const size_t size = columns[0]->size();
+    if (columns[1]->size() != size) return Status::InvalidArgument("ST_SimplifyPreserveTopology argument sizes differ");
+    if (columns[0]->only_null() || columns[1]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOMETRY>(columns[0]));
+    ASSIGN_OR_RETURN(auto result, create_geometry_result(context));
+    const auto* output =
+            down_cast<const GeoColumn*>(down_cast<const NullableColumn*>(result.get())->data_column().get());
+    if (!is_geo_compute_compatible(input.data->descriptor(), output->descriptor())) {
+        return Status::InvalidArgument("ST_SimplifyPreserveTopology return CRS does not match its input");
+    }
+    ColumnViewer<TYPE_DOUBLE> tolerances(columns[1]);
+    const auto* prepared = reinterpret_cast<const NativeGeoTopologySimplifyState*>(
+            context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::unique_ptr<PreparedGeoTopologySimplify> batch_constant;
+    const bool constant = input.constant && columns[1]->is_constant();
+    const size_t rows = constant && size != 0 ? 1 : size;
+    for (size_t row = 0; row < rows; ++row) {
+        RETURN_IF_ERROR(simplify_checkpoint(context));
+        if (input.is_null(row) || tolerances.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        const double tolerance = tolerances.value(row);
+        if (!std::isfinite(tolerance) || tolerance < 0)
+            return Status::InvalidArgument("ST_SimplifyPreserveTopology requires a finite nonnegative tolerance");
+        std::unique_ptr<PreparedGeoTopologySimplify> varying;
+        const PreparedGeoTopologySimplify* model;
+        if (prepared != nullptr) {
+            RETURN_IF_ERROR(prepared->status);
+            model = prepared->input.get();
+            if (model == nullptr)
+                return Status::InvalidArgument("ST_SimplifyPreserveTopology constant geometry is NULL");
+        } else {
+            auto* target = input.constant ? &batch_constant : &varying;
+            if (!input.constant || *target == nullptr) {
+                ASSIGN_OR_RETURN(*target, PreparedGeoTopologySimplify::prepare(
+                                                  input.wkb(row), [&] { return simplify_checkpoint(context); }));
+            }
+            model = target->get();
+        }
+        ASSIGN_OR_RETURN(auto wkb, model->simplify(tolerance, [&] { return simplify_checkpoint(context); }));
+        result->append_datum(Datum(Slice(wkb)));
+        RETURN_IF_ERROR(simplify_checkpoint(context));
+    }
+    if (constant && size != 0) return ConstColumn::create(std::move(result), size);
+    return result;
+}
+
 template <LogicalType InputType>
 StatusOr<ColumnPtr> construct_geography(FunctionContext* context, const Columns& columns, bool text) {
     const size_t size = columns[0]->size();
@@ -978,6 +1196,155 @@ StatusOr<ColumnPtr> construct_geometry(FunctionContext* context, const Columns& 
     return result;
 }
 
+struct NativeGeoUnaryState {
+    bool constant = false;
+    Status parse_status = Status::OK();
+    std::optional<WkbGeometry> geometry;
+};
+
+StatusOr<const WkbGeometry*> unary_geometry(const GeoInput& input, size_t row, WkbCoordinateSemantics semantics,
+                                            const NativeGeoUnaryState* prepared,
+                                            std::optional<WkbGeometry>* constant_geometry,
+                                            WkbGeometry* varying_geometry) {
+    if (prepared != nullptr && prepared->constant) {
+        RETURN_IF_ERROR(prepared->parse_status);
+        return &prepared->geometry.value();
+    }
+    if (input.constant) {
+        if (!constant_geometry->has_value()) {
+            WkbGeometry parsed;
+            RETURN_IF_ERROR(WkbCodec::parse_wkb(input.wkb(row), &parsed, semantics));
+            constant_geometry->emplace(std::move(parsed));
+        }
+        return &constant_geometry->value();
+    }
+    RETURN_IF_ERROR(WkbCodec::parse_wkb(input.wkb(row), varying_geometry, semantics));
+    return varying_geometry;
+}
+
+template <LogicalType Type, GeoMeasurementKind Kind>
+StatusOr<ColumnPtr> geo_measure(FunctionContext* context, const Columns& columns) {
+    constexpr auto semantics = Type == TYPE_GEOGRAPHY ? WkbCoordinateSemantics::GEOGRAPHY_CRS84
+                                                      : WkbCoordinateSemantics::GEOMETRY_CARTESIAN;
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<Type>(columns[0]));
+    const size_t rows = input.constant ? 1 : size;
+    const auto* prepared = context == nullptr ? nullptr
+                                              : reinterpret_cast<const NativeGeoUnaryState*>(
+                                                        context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::optional<WkbGeometry> constant_geometry;
+    ColumnBuilder<TYPE_DOUBLE> result(rows);
+    for (size_t row = 0; row < rows; ++row) {
+        if (input.is_null(row)) {
+            result.append_null();
+            continue;
+        }
+        WkbGeometry varying_geometry;
+        ASSIGN_OR_RETURN(const auto* geometry,
+                         unary_geometry(input, row, semantics, prepared, &constant_geometry, &varying_geometry));
+        if constexpr (Type == TYPE_GEOGRAPHY) {
+            ASSIGN_OR_RETURN(auto value, spherical_measurement(*geometry, Kind));
+            result.append(value);
+        } else {
+            ASSIGN_OR_RETURN(auto value, planar_measurement(*geometry, Kind));
+            result.append(value);
+        }
+    }
+    auto output = result.build(false);
+    if (input.constant) return ConstColumn::create(std::move(output), size);
+    return output;
+}
+
+template <LogicalType Type>
+StatusOr<ColumnPtr> geo_validity(FunctionContext* context, const Columns& columns) {
+    constexpr auto semantics = Type == TYPE_GEOGRAPHY ? WkbCoordinateSemantics::GEOGRAPHY_CRS84
+                                                      : WkbCoordinateSemantics::GEOMETRY_CARTESIAN;
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<Type>(columns[0]));
+    const size_t rows = input.constant ? 1 : size;
+    const auto* prepared = context == nullptr ? nullptr
+                                              : reinterpret_cast<const NativeGeoUnaryState*>(
+                                                        context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::optional<WkbGeometry> constant_geometry;
+    ColumnBuilder<TYPE_BOOLEAN> result(rows);
+    for (size_t row = 0; row < rows; ++row) {
+        if (input.is_null(row)) {
+            result.append_null();
+            continue;
+        }
+        WkbGeometry varying_geometry;
+        ASSIGN_OR_RETURN(const auto* geometry,
+                         unary_geometry(input, row, semantics, prepared, &constant_geometry, &varying_geometry));
+        if constexpr (Type == TYPE_GEOGRAPHY) {
+            ASSIGN_OR_RETURN(auto valid, spherical_is_valid(*geometry));
+            result.append(valid);
+        } else {
+            ASSIGN_OR_RETURN(auto valid, planar_is_valid(*geometry));
+            result.append(valid);
+        }
+    }
+    auto output = result.build(false);
+    if (input.constant) return ConstColumn::create(std::move(output), size);
+    return output;
+}
+
+template <LogicalType Type>
+StatusOr<MutableColumnPtr> create_centroid_result(FunctionContext* context) {
+    if (context == nullptr) return Status::InvalidArgument("ST_Centroid requires a function context");
+    const auto& type = context->get_return_type();
+    if (type.type != Type || !type.geo_type.has_value()) {
+        return Status::NotSupported("ST_Centroid requires native GEO return metadata");
+    }
+    GeoColumnDescriptor descriptor{type.geo_type.value(),
+                                   {GEO_ENCODING_WKB, GEO_DIMENSION_XY, GEO_VALIDATION_STATE_SEMANTICALLY_VALIDATED}};
+    auto data = GeoColumn::create(std::move(descriptor));
+    if constexpr (Type == TYPE_GEOGRAPHY) {
+        RETURN_IF_ERROR(check_geography_boundary(*data));
+    } else {
+        RETURN_IF_ERROR(check_geometry_compute_boundary(*data));
+    }
+    return NullableColumn::create(std::move(data), NullColumn::create());
+}
+
+template <LogicalType Type>
+StatusOr<ColumnPtr> geo_centroid(FunctionContext* context, const Columns& columns) {
+    constexpr auto semantics = Type == TYPE_GEOGRAPHY ? WkbCoordinateSemantics::GEOGRAPHY_CRS84
+                                                      : WkbCoordinateSemantics::GEOMETRY_CARTESIAN;
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<Type>(columns[0]));
+    const size_t rows = input.constant ? 1 : size;
+    const auto* prepared =
+            reinterpret_cast<const NativeGeoUnaryState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    std::optional<WkbGeometry> constant_geometry;
+    ASSIGN_OR_RETURN(auto result, create_centroid_result<Type>(context));
+    for (size_t row = 0; row < rows; ++row) {
+        if (input.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        WkbGeometry varying_geometry;
+        ASSIGN_OR_RETURN(const auto* geometry,
+                         unary_geometry(input, row, semantics, prepared, &constant_geometry, &varying_geometry));
+        GeoCentroidResult centroid;
+        if constexpr (Type == TYPE_GEOGRAPHY) {
+            ASSIGN_OR_RETURN(centroid, spherical_centroid(*geometry));
+        } else {
+            ASSIGN_OR_RETURN(centroid, planar_centroid(*geometry));
+        }
+        WkbGeometry point;
+        point.type = WkbGeometryType::POINT;
+        point.empty = centroid.empty;
+        if (!centroid.empty) point.coordinates.emplace_back(centroid.coordinate);
+        std::string wkb;
+        RETURN_IF_ERROR(WkbCodec::to_wkb(point, &wkb, semantics));
+        result->append_datum(Datum(Slice(wkb)));
+    }
+    if (input.constant) return ConstColumn::create(std::move(result), size);
+    return result;
+}
 template <LogicalType OutputType, LogicalType GeoType>
 StatusOr<ColumnPtr> serialize_geo(const Columns& columns, bool text) {
     const size_t size = columns[0]->size();
@@ -1013,6 +1380,83 @@ StatusOr<ColumnPtr> serialize_geo(const Columns& columns, bool text) {
     auto output = result.build(false);
     if (constant) return ConstColumn::create(std::move(output), size);
     return output;
+}
+
+struct NativeGeoCrsState {
+    std::string source;
+    std::string target;
+};
+
+constexpr double kPi = 3.141592653589793238462643383279502884;
+constexpr double kWebMercatorRadius = 6378137.0;
+constexpr double kWebMercatorMaxLatitude = 85.0511287798066;
+constexpr double kWebMercatorMaxCoordinate = kWebMercatorRadius * kPi + 1e-7;
+
+StatusOr<int32_t> supported_transform_srid(std::string_view crs) {
+    if (crs == "EPSG:4326" || crs == "OGC:CRS84") return 4326;
+    if (crs == "EPSG:3857") return 3857;
+    return Status::NotSupported("ST_Transform supports only EPSG:4326 and EPSG:3857");
+}
+
+Status transform_coordinate(WkbCoordinate* point, int32_t source_srid, int32_t target_srid) {
+    if (!std::isfinite(point->x) || !std::isfinite(point->y)) {
+        return Status::InvalidArgument("ST_Transform coordinate is not finite");
+    }
+    if (source_srid == target_srid) return Status::OK();
+    if (source_srid == 4326) {
+        if (std::abs(point->x) > 180.0 || std::abs(point->y) > kWebMercatorMaxLatitude) {
+            return Status::InvalidArgument("ST_Transform coordinate is outside the EPSG:4326 Web Mercator domain");
+        }
+        const double longitude = point->x * kPi / 180.0;
+        const double latitude = point->y * kPi / 180.0;
+        point->x = kWebMercatorRadius * longitude;
+        point->y = kWebMercatorRadius * std::asinh(std::tan(latitude));
+    } else {
+        if (std::abs(point->x) > kWebMercatorMaxCoordinate || std::abs(point->y) > kWebMercatorMaxCoordinate) {
+            return Status::InvalidArgument("ST_Transform coordinate is outside the EPSG:3857 Web Mercator domain");
+        }
+        point->x = point->x / kWebMercatorRadius * 180.0 / kPi;
+        point->y = std::atan(std::sinh(point->y / kWebMercatorRadius)) * 180.0 / kPi;
+        // Rounding at the Web Mercator edge must not make a valid inverse result
+        // invalid as input to a subsequent forward transformation.
+        point->x = std::clamp(point->x, -180.0, 180.0);
+        point->y = std::clamp(point->y, -kWebMercatorMaxLatitude, kWebMercatorMaxLatitude);
+    }
+    if (!std::isfinite(point->x) || !std::isfinite(point->y)) {
+        return Status::InvalidArgument("ST_Transform coordinate is outside the supported CRS domain");
+    }
+    return Status::OK();
+}
+
+Status transform_geometry_coordinates(WkbGeometry* geometry, int32_t source_srid, int32_t target_srid) {
+    auto transform_point = [source_srid, target_srid](WkbCoordinate* point) -> Status {
+        return transform_coordinate(point, source_srid, target_srid);
+    };
+    for (auto& coordinate : geometry->coordinates) RETURN_IF_ERROR(transform_point(&coordinate));
+    for (auto& ring : geometry->rings) {
+        for (auto& coordinate : ring) RETURN_IF_ERROR(transform_point(&coordinate));
+    }
+    for (auto& child : geometry->children) {
+        RETURN_IF_ERROR(transform_geometry_coordinates(&child, source_srid, target_srid));
+    }
+    return Status::OK();
+}
+
+StatusOr<int32_t> checked_target_srid(FunctionContext* context, const Columns& columns) {
+    if (context == nullptr || columns.size() != 2 || !columns[1]->is_constant() || columns[1]->only_null()) {
+        return Status::InvalidArgument("Target SRID must be a non-NULL constant INT");
+    }
+    ColumnViewer<TYPE_INT> target(columns[1]);
+    if (target.is_null(0) || target.value(0) <= 0) {
+        return Status::InvalidArgument("Target SRID must be a positive INT");
+    }
+    const int32_t value = target.value(0);
+    const auto& type = context->get_return_type();
+    if (type.type != TYPE_GEOMETRY || !type.geo_type.has_value() ||
+        type.geo_type->crs != "EPSG:" + std::to_string(value) || type.geo_type->srid != value) {
+        return Status::InvalidArgument("Target SRID conflicts with GEOMETRY result descriptor");
+    }
+    return value;
 }
 
 } // namespace
@@ -1466,6 +1910,80 @@ StatusOr<ColumnPtr> GeoFunctions::st_geography_intersects(FunctionContext* conte
 StatusOr<ColumnPtr> GeoFunctions::st_geometry_intersects(FunctionContext* context, const Columns& columns) {
     return geo_intersects<TYPE_GEOMETRY>(context, columns);
 }
+Status GeoFunctions::native_geo_unary_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope != FunctionContext::FRAGMENT_LOCAL || !context->is_constant_column(0)) return Status::OK();
+    const auto* argument_type = context->get_arg_type(0);
+    if (argument_type == nullptr || (argument_type->type != TYPE_GEOGRAPHY && argument_type->type != TYPE_GEOMETRY)) {
+        return Status::InvalidArgument("Native GEO unary function requires GEOGRAPHY or GEOMETRY");
+    }
+    auto state = std::make_unique<NativeGeoUnaryState>();
+    state->constant = true;
+    const auto& column = context->get_constant_column(0);
+    if (!column->only_null()) {
+        if (argument_type->type == TYPE_GEOGRAPHY) {
+            ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOGRAPHY>(column));
+            WkbGeometry geometry;
+            state->parse_status = WkbCodec::parse_wkb(input.wkb(0), &geometry, WkbCoordinateSemantics::GEOGRAPHY_CRS84);
+            if (state->parse_status.ok()) state->geometry.emplace(std::move(geometry));
+        } else {
+            ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOMETRY>(column));
+            WkbGeometry geometry;
+            state->parse_status =
+                    WkbCodec::parse_wkb(input.wkb(0), &geometry, WkbCoordinateSemantics::GEOMETRY_CARTESIAN);
+            if (state->parse_status.ok()) state->geometry.emplace(std::move(geometry));
+        }
+    }
+    context->set_function_state(scope, state.release());
+    return Status::OK();
+}
+
+Status GeoFunctions::native_geo_unary_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        delete reinterpret_cast<NativeGeoUnaryState*>(context->get_function_state(scope));
+        context->set_function_state(scope, nullptr);
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geography_area(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOGRAPHY, GeoMeasurementKind::AREA>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_area(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOMETRY, GeoMeasurementKind::AREA>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geography_length(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOGRAPHY, GeoMeasurementKind::LENGTH>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_length(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOMETRY, GeoMeasurementKind::LENGTH>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geography_perimeter(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOGRAPHY, GeoMeasurementKind::PERIMETER>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_perimeter(FunctionContext* context, const Columns& columns) {
+    return geo_measure<TYPE_GEOMETRY, GeoMeasurementKind::PERIMETER>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geography_centroid(FunctionContext* context, const Columns& columns) {
+    return geo_centroid<TYPE_GEOGRAPHY>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_centroid(FunctionContext* context, const Columns& columns) {
+    return geo_centroid<TYPE_GEOMETRY>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geography_is_valid(FunctionContext* context, const Columns& columns) {
+    return geo_validity<TYPE_GEOGRAPHY>(context, columns);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_is_valid(FunctionContext* context, const Columns& columns) {
+    return geo_validity<TYPE_GEOMETRY>(context, columns);
+}
 
 struct StContainsState {
     StContainsState() = default;
@@ -1600,6 +2118,255 @@ Status GeoFunctions::st_line_prepare(FunctionContext* ctx, FunctionContext::Func
 
 Status GeoFunctions::st_polygon_prepare(FunctionContext* ctx, FunctionContext::FunctionStateScope scope) {
     return st_from_wkt_prepare_common(ctx, scope, GEO_SHAPE_POLYGON);
+}
+
+Status GeoFunctions::native_geo_transform_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope != FunctionContext::FRAGMENT_LOCAL) return Status::OK();
+    if (context == nullptr || !context->is_constant_column(1)) {
+        return Status::InvalidArgument("Native GEOMETRY CRS functions require a constant target SRID");
+    }
+    const auto* source_type = context->get_arg_type(0);
+    const auto& result_type = context->get_return_type();
+    if (source_type == nullptr || source_type->type != TYPE_GEOMETRY || !source_type->geo_type.has_value() ||
+        result_type.type != TYPE_GEOMETRY || !result_type.geo_type.has_value()) {
+        return Status::InvalidArgument("Native GEOMETRY CRS functions require semantic type metadata");
+    }
+    auto target_column = context->get_constant_column(1);
+    if (target_column == nullptr || target_column->only_null()) {
+        return Status::InvalidArgument("Target SRID must be a non-NULL constant INT");
+    }
+    ColumnViewer<TYPE_INT> target(target_column);
+    if (target.is_null(0) || target.value(0) <= 0) {
+        return Status::InvalidArgument("Target SRID must be a positive INT");
+    }
+    const std::string target_crs = "EPSG:" + std::to_string(target.value(0));
+    if (result_type.geo_type->crs != target_crs || result_type.geo_type->srid != target.value(0)) {
+        return Status::InvalidArgument("Target SRID conflicts with GEOMETRY result descriptor");
+    }
+    auto state = std::make_unique<NativeGeoCrsState>();
+    state->source = source_type->geo_type->crs;
+    state->target = target_crs;
+    if (state->source.empty() || source_type->geo_type->srid != derive_srid(state->source)) {
+        return Status::InvalidArgument("Source GEOMETRY CRS is missing or conflicts with SRID metadata");
+    }
+    ASSIGN_OR_RETURN(const int32_t source_srid, supported_transform_srid(state->source));
+    ASSIGN_OR_RETURN(const int32_t target_srid, supported_transform_srid(state->target));
+    (void)source_srid;
+    (void)target_srid;
+    context->set_function_state(scope, state.release());
+    return Status::OK();
+}
+
+Status GeoFunctions::native_geo_transform_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        delete reinterpret_cast<NativeGeoCrsState*>(context->get_function_state(scope));
+        context->set_function_state(scope, nullptr);
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_srid(FunctionContext*, const Columns& columns) {
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    const bool constant = columns[0]->is_constant();
+    const Column* source =
+            constant ? down_cast<const ConstColumn*>(columns[0].get())->data_column().get() : columns[0].get();
+    const auto* nullable = source->is_nullable() ? down_cast<const NullableColumn*>(source) : nullptr;
+    const auto* geo = down_cast<const GeoColumn*>(nullable ? nullable->data_column().get() : source);
+    RETURN_IF_ERROR(check_geometry_boundary(*geo));
+    const size_t rows = constant ? 1 : size;
+    ColumnBuilder<TYPE_INT> result(rows);
+    for (size_t row = 0; row < rows; ++row) {
+        if ((nullable != nullptr && nullable->is_null(row)) || !geo->descriptor().type.srid.has_value()) {
+            result.append_null();
+        } else {
+            result.append(geo->descriptor().type.srid.value());
+        }
+    }
+    auto output = result.build(false);
+    if (constant) return ConstColumn::create(std::move(output), size);
+    return output;
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_set_srid(FunctionContext* context, const Columns& columns) {
+    ASSIGN_OR_RETURN(const int32_t target_srid, checked_target_srid(context, columns));
+    const auto* state =
+            reinterpret_cast<const NativeGeoCrsState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    if (state == nullptr || state->target != "EPSG:" + std::to_string(target_srid)) {
+        return Status::InvalidArgument("ST_SetSRID requires prepared CRS metadata");
+    }
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOMETRY>(columns[0]));
+    if (input.data->descriptor().type.crs != state->source) {
+        return Status::InvalidArgument("Source GEOMETRY CRS differs from prepared descriptor");
+    }
+    const bool constant = ColumnHelper::is_all_const(columns);
+    const size_t rows = constant ? 1 : size;
+    ASSIGN_OR_RETURN(auto result, create_geometry_result(context));
+    for (size_t row = 0; row < rows; ++row) {
+        if (input.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        WkbGeometry geometry;
+        RETURN_IF_ERROR(WkbCodec::parse_wkb(input.wkb(row), &geometry, WkbCoordinateSemantics::GEOMETRY_CARTESIAN));
+        // Re-tag the existing WKB; ST_SetSRID never changes its coordinate bytes.
+        result->append_datum(Datum(input.wkb(row)));
+    }
+    if (constant) return ConstColumn::create(std::move(result), size);
+    return result;
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_transform(FunctionContext* context, const Columns& columns) {
+    ASSIGN_OR_RETURN(const int32_t target_srid, checked_target_srid(context, columns));
+    const auto* state =
+            reinterpret_cast<const NativeGeoCrsState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    if (state == nullptr || state->target != "EPSG:" + std::to_string(target_srid)) {
+        return Status::InvalidArgument("ST_Transform requires prepared CRS metadata");
+    }
+    const size_t size = columns[0]->size();
+    if (columns[0]->only_null()) return ColumnHelper::create_const_null_column(size);
+    ASSIGN_OR_RETURN(auto input, geo_input<TYPE_GEOMETRY>(columns[0]));
+    if (input.data->descriptor().type.crs != state->source) {
+        return Status::InvalidArgument("Source GEOMETRY CRS differs from prepared descriptor");
+    }
+    ASSIGN_OR_RETURN(const int32_t source_srid, supported_transform_srid(state->source));
+    ASSIGN_OR_RETURN(const int32_t prepared_target_srid, supported_transform_srid(state->target));
+    if (prepared_target_srid != target_srid) {
+        return Status::InvalidArgument("Target SRID differs from prepared GEOMETRY CRS");
+    }
+    const bool constant = ColumnHelper::is_all_const(columns);
+    const size_t rows = constant ? 1 : size;
+    ASSIGN_OR_RETURN(auto result, create_geometry_result(context));
+    for (size_t row = 0; row < rows; ++row) {
+        if (input.is_null(row)) {
+            result->append_nulls(1);
+            continue;
+        }
+        WkbGeometry geometry;
+        RETURN_IF_ERROR(WkbCodec::parse_wkb(input.wkb(row), &geometry, WkbCoordinateSemantics::GEOMETRY_CARTESIAN));
+        RETURN_IF_ERROR(transform_geometry_coordinates(&geometry, source_srid, target_srid));
+        std::string wkb;
+        RETURN_IF_ERROR(WkbCodec::to_wkb(geometry, &wkb, WkbCoordinateSemantics::GEOMETRY_CARTESIAN));
+        result->append_datum(Datum(Slice(wkb)));
+    }
+    if (constant) return ConstColumn::create(std::move(result), size);
+    return result;
+}
+
+Status GeoFunctions::native_geo_buffer_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope != FunctionContext::FRAGMENT_LOCAL || !context->is_constant_column(0)) return Status::OK();
+    RETURN_IF_ERROR(buffer_checkpoint(context));
+    auto prepared = std::make_unique<NativeGeoBufferState>();
+    const auto& column = context->get_constant_column(0);
+    if (!column->only_null() && column->size() != 0) {
+        // Keep plan-time errors lazy until a non-NULL row uses this geometry.
+        auto input = geo_input<TYPE_GEOMETRY>(column);
+        prepared->status = input.status();
+        if (prepared->status.ok()) {
+            auto model = PreparedGeoBuffer::prepare(input->wkb(0), [&] { return buffer_checkpoint(context); });
+            prepared->status = model.status();
+            if (prepared->status.ok()) prepared->input = std::move(model.value());
+        }
+    }
+    RETURN_IF_ERROR(buffer_checkpoint(context));
+    context->set_function_state(scope, prepared.release());
+    return Status::OK();
+}
+
+Status GeoFunctions::native_geo_buffer_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        delete reinterpret_cast<NativeGeoBufferState*>(context->get_function_state(scope));
+        context->set_function_state(scope, nullptr);
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_buffer(FunctionContext* context, const Columns& columns) {
+    return geo_buffer(context, columns);
+}
+
+Status GeoFunctions::native_geo_simplify_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope != FunctionContext::FRAGMENT_LOCAL || !context->is_constant_column(0)) return Status::OK();
+    RETURN_IF_ERROR(simplify_checkpoint(context));
+    auto prepared = std::make_unique<NativeGeoTopologySimplifyState>();
+    const auto& column = context->get_constant_column(0);
+    if (!column->only_null() && column->size() != 0) {
+        // Keep plan-time errors lazy until a non-NULL row uses this geometry.
+        auto input = geo_input<TYPE_GEOMETRY>(column);
+        prepared->status = input.status();
+        if (prepared->status.ok()) {
+            auto model =
+                    PreparedGeoTopologySimplify::prepare(input->wkb(0), [&] { return simplify_checkpoint(context); });
+            prepared->status = model.status();
+            if (prepared->status.is_cancelled() || prepared->status.is_mem_limit_exceeded()) return prepared->status;
+            if (prepared->status.ok()) prepared->input = std::move(model.value());
+        }
+    }
+    RETURN_IF_ERROR(simplify_checkpoint(context));
+    context->set_function_state(scope, prepared.release());
+    return Status::OK();
+}
+
+Status GeoFunctions::native_geo_simplify_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        delete reinterpret_cast<NativeGeoTopologySimplifyState*>(context->get_function_state(scope));
+        context->set_function_state(scope, nullptr);
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_simplify_preserve_topology(FunctionContext* context,
+                                                                         const Columns& columns) {
+    return geo_simplify(context, columns);
+}
+
+Status GeoFunctions::native_geo_overlay_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope != FunctionContext::FRAGMENT_LOCAL ||
+        (!context->is_constant_column(0) && !context->is_constant_column(1)))
+        return Status::OK();
+    RETURN_IF_ERROR(overlay_checkpoint(context));
+    auto state = std::make_unique<NativeGeoOverlayState>();
+    for (size_t argument = 0; argument < 2; ++argument) {
+        auto& prepared = state->arguments[argument];
+        prepared.constant = context->is_constant_column(argument);
+        if (!prepared.constant) continue;
+        const auto& column = context->get_constant_column(argument);
+        if (column->only_null()) continue;
+        // Defer constant input errors until a non-NULL row actually uses this operand.
+        auto input = geo_input<TYPE_GEOMETRY>(column);
+        prepared.status = input.status();
+        if (!prepared.status.ok()) continue;
+        auto polygon = PreparedGeoPolygon::prepare(input->wkb(0));
+        prepared.status = polygon.status();
+        if (prepared.status.ok()) prepared.polygon = std::move(polygon.value());
+        RETURN_IF_ERROR(overlay_checkpoint(context));
+    }
+    context->set_function_state(scope, state.release());
+    return Status::OK();
+}
+
+Status GeoFunctions::native_geo_overlay_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        delete reinterpret_cast<NativeGeoOverlayState*>(context->get_function_state(scope));
+        context->set_function_state(scope, nullptr);
+    }
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_intersection(FunctionContext* context, const Columns& columns) {
+    return geo_overlay(context, columns, GeoOverlayKind::INTERSECTION);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_union(FunctionContext* context, const Columns& columns) {
+    return geo_overlay(context, columns, GeoOverlayKind::UNION);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_difference(FunctionContext* context, const Columns& columns) {
+    return geo_overlay(context, columns, GeoOverlayKind::DIFFERENCE);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_geometry_sym_difference(FunctionContext* context, const Columns& columns) {
+    return geo_overlay(context, columns, GeoOverlayKind::SYMMETRIC_DIFFERENCE);
 }
 
 } // namespace starrocks

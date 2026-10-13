@@ -1056,6 +1056,120 @@ public class FunctionAnalyzer {
             Expr newChildExpr = new StringLiteral(originType.toTypeString());
             node.getParams().exprs().set(0, newChildExpr);
             node.setChild(0, newChildExpr);
+        } else if (FunctionSet.ST_COVERAGE_SIMPLIFY.equalsIgnoreCase(fnName)) {
+            if (argumentTypes.length != 2 && argumentTypes.length != 3) {
+                throw new SemanticException("ST_CoverageSimplify requires two or three arguments");
+            }
+            if (argumentTypes[0].getPrimitiveType() != PrimitiveType.GEOMETRY ||
+                    ((ScalarType) argumentTypes[0]).getGeoDescriptor() == null) {
+                throw new SemanticException("ST_CoverageSimplify requires a native GEOMETRY CRS descriptor");
+            }
+            if (!argumentTypes[1].isNumericType() && !argumentTypes[1].isNull()) {
+                throw new SemanticException("ST_CoverageSimplify tolerance must be numeric");
+            }
+            if (argumentTypes.length == 3 && !argumentTypes[2].isBoolean() && !argumentTypes[2].isNull()) {
+                throw new SemanticException("ST_CoverageSimplify boundary must be BOOLEAN");
+            }
+            Expr[] folded = new Expr[argumentTypes.length];
+            for (int i = 1; i < argumentTypes.length; ++i) {
+                if (!node.getChild(i).isConstant()) {
+                    throw new SemanticException("ST_CoverageSimplify tolerance and boundary must be plan-constant");
+                }
+                folded[i] = ExprUtils.analyzeAndCastFold(node.getChild(i).clone());
+                if (!(folded[i] instanceof LiteralExpr)) {
+                    throw new SemanticException("ST_CoverageSimplify parameters must fold to constants");
+                }
+            }
+            boolean nullParameter = folded[1] instanceof NullLiteral ||
+                    (argumentTypes.length == 3 && folded[2] instanceof NullLiteral);
+            if (!nullParameter) {
+                double value = ((LiteralExpr) folded[1]).getDoubleValue();
+                if (!Double.isFinite(value) || value < 0 || !Double.isFinite(value * value)) {
+                    throw new SemanticException("ST_CoverageSimplify requires finite nonnegative tolerance " +
+                            "and representable tolerance squared");
+                }
+            }
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                fn = fn.copy();
+                fn.setRetType(argumentTypes[0]);
+            }
+        } else if ((FunctionSet.ST_BUFFER.equalsIgnoreCase(fnName) ||
+                FunctionSet.ST_SIMPLIFY_PRESERVE_TOPOLOGY.equalsIgnoreCase(fnName)) && argumentTypes.length == 2 &&
+                argumentTypes[0].getPrimitiveType() == PrimitiveType.GEOMETRY) {
+            GeoTypeDescriptor descriptor = ((ScalarType) argumentTypes[0]).getGeoDescriptor();
+            if (descriptor == null) {
+                throw new SemanticException("%s requires a GEOMETRY CRS descriptor", fnName);
+            }
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                fn = fn.copy();
+                fn.setRetType(argumentTypes[0]);
+            }
+        } else if ((FunctionSet.ST_INTERSECTION.equalsIgnoreCase(fnName) ||
+                FunctionSet.ST_UNION.equalsIgnoreCase(fnName) ||
+                FunctionSet.ST_DIFFERENCE.equalsIgnoreCase(fnName) ||
+                FunctionSet.ST_SYMDIFFERENCE.equalsIgnoreCase(fnName)) && argumentTypes.length == 2 &&
+                ((argumentTypes[0].getPrimitiveType() == PrimitiveType.GEOMETRY &&
+                        (argumentTypes[1].isNull() || argumentTypes[1].getPrimitiveType() == PrimitiveType.GEOMETRY)) ||
+                        (argumentTypes[0].isNull() && argumentTypes[1].getPrimitiveType() == PrimitiveType.GEOMETRY))) {
+            Type resultType = argumentTypes[0].isNull() ? argumentTypes[1] : argumentTypes[0];
+            GeoTypeDescriptor left = ((ScalarType) resultType).getGeoDescriptor();
+            GeoTypeDescriptor right = argumentTypes[1].isNull() ? left :
+                    ((ScalarType) argumentTypes[1]).getGeoDescriptor();
+            if (left == null || right == null || !left.isSemanticallyCompatible(right)) {
+                throw new SemanticException("%s requires compatible GEOMETRY CRS descriptors", fnName);
+            }
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                fn = fn.copy();
+                fn.setRetType(resultType);
+            }
+        } else if ((FunctionSet.ST_SETSRID.equalsIgnoreCase(fnName) ||
+                FunctionSet.ST_TRANSFORM.equalsIgnoreCase(fnName)) && argumentTypes.length == 2 &&
+                argumentTypes[0].getPrimitiveType() == PrimitiveType.GEOMETRY) {
+            Expr sridExpr = node.getChild(1);
+            if (!sridExpr.isConstant()) {
+                throw new SemanticException("%s requires a foldable constant target SRID", fnName);
+            }
+            Expr folded = ExprUtils.analyzeAndCastFold(sridExpr.clone());
+            // Check the original folded integer before narrowing LARGEINT to an INT SRID.
+            BigInteger value = toBigInteger(folded);
+            if (value == null || value.signum() <= 0 || value.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) {
+                throw new SemanticException("%s requires a positive INT target SRID", fnName);
+            }
+            int targetSrid = value.intValueExact();
+            if (targetSrid != 4326 && targetSrid != 3857) {
+                throw new SemanticException("%s supports only EPSG:4326 and EPSG:3857", fnName);
+            }
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                IntLiteral target = new IntLiteral(targetSrid, IntegerType.INT);
+                node.getParams().exprs().set(1, target);
+                node.setChild(1, target);
+                fn = fn.copy();
+                fn.setRetType(ScalarType.createGeoType(PrimitiveType.GEOMETRY,
+                        GeoTypeDescriptor.geometry("EPSG:" + targetSrid)));
+            }
+        } else if ("st_geogfromtext".equalsIgnoreCase(fnName) || "st_geogfromwkb".equalsIgnoreCase(fnName) ||
+                FunctionSet.H3_TOBOUNDARY.equalsIgnoreCase(fnName)) {
+            // These producers have a fixed CRS84 result, which must be concrete before planning.
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                fn = fn.copy();
+                fn.setRetType(ScalarType.createGeoType(PrimitiveType.GEOGRAPHY,
+                        new GeoTypeDescriptor(GeoTypeDescriptor.LogicalType.GEOGRAPHY,
+                                GeoTypeDescriptor.CoordinateSystem.SPHERICAL,
+                                GeoTypeDescriptor.EdgeAlgorithm.SPHERICAL, "OGC:CRS84", 4326)));
+            }
+        } else if (FunctionSet.ST_CENTROID.equalsIgnoreCase(fnName) && argumentTypes.length == 1 &&
+                (argumentTypes[0].getPrimitiveType() == PrimitiveType.GEOGRAPHY ||
+                        argumentTypes[0].getPrimitiveType() == PrimitiveType.GEOMETRY)) {
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            if (fn != null) {
+                fn = fn.copy();
+                fn.setRetType(argumentTypes[0]);
+            }
         } else if ((FunctionSet.ST_GEOMFROMTEXT.equalsIgnoreCase(fnName) ||
                 FunctionSet.ST_GEOMFROMWKB.equalsIgnoreCase(fnName)) && argumentTypes.length == 2) {
             if (!(node.getChild(1) instanceof StringLiteral)) {
