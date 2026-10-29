@@ -41,47 +41,6 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 
 ## クエリ
 
-### H3 リソース制限
-
-以下の変更可能な正の BE 設定は H3 関数の 1 行を制限します。超過時は部分結果ではなくエラーになります。関数と中心フィルについては [H3 関数](../../../sql-reference/sql-functions/spatial-functions/h3-functions.md) を参照してください。
-
-#### h3_max_cells_per_row
-
-- Default: 100000
-- Is mutable: Yes
-- Limit: cells / pre-deduplication expansion slots.
-
-#### h3_max_grid_disk_k
-
-- Default: 128
-- Is mutable: Yes
-- Limit: grid steps.
-
-#### h3_max_polygon_vertices
-
-- Default: 10000
-- Is mutable: Yes
-- Limit: coordinate positions including ring closure.
-
-#### h3_max_polygon_components
-
-- Default: 256
-- Is mutable: Yes
-- Limit: polygon components including empty components.
-
-#### h3_max_working_bytes
-
-- Default: 67108864
-- Is mutable: Yes
-- Limit: bytes of per-worker preparation and temporary buffers.
-
-#### h3_max_estimated_work_per_row
-
-- Default: 10000000
-- Is mutable: Yes
-- Limit: sum of estimated slots times (component positions + 1).
-
-
 ### ai_function_request_timeout_ms
 
 - デフォルト: 600000
@@ -110,6 +69,16 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 有効な値: 正の整数
 - 変更可能: はい
 - 説明: 1 回の AI HTTP attempt から受け付ける response body の最大サイズです。この上限を超えたレスポンスは Provider による解析前に拒否され、BE のメモリ消費を制限します。モデルが正当に大きなレスポンスを返す場合にのみ値を増やしてください。新しく開かれた AI fragment/operator は、この値を完全な immutable runtime snapshot の一部として取得し、すでに開かれている fragment は既存の snapshot を使い続けます。変更に BE の再起動は不要です。
+- 導入バージョン: -
+
+### ai_function_max_input_file_bytes
+
+- デフォルト: 10485760
+- タイプ: Int
+- 単位: バイト
+- 有効な値: 正の整数
+- 変更可能: はい
+- 説明: `ai_complete` または `ai_embed` に渡す各 inline FILE の生バイト数の上限です。AI が保持するペイロードのコピーと Base64 エンコードの前に検査します。デフォルトは 10 MiB です。選択したプロバイダーとモデルが大きな入力に対応する場合にのみ増やしてください。この上限はスキャンや Chunk の実体化を制御しません。これらのメモリ割り当てと AI ペイロードには、引き続きクエリのメモリ追跡が適用されます。不正または上限超過の inline 入力は `ai_function_on_error` に従います。新しく開かれた AI fragment/operator は不可変のランタイムスナップショットにこの値を取り込み、すでに開かれた fragment は既存のスナップショットを保持します。変更に BE の再起動は不要です。
 - 導入バージョン: -
 
 ### ai_function_worker_thread_num
@@ -179,7 +148,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 単位: リクエスト/秒
 - 有効な値: 正の整数
 - 変更可能: はい
-- 説明: 各 BE でエンドポイント、認証情報、capability ごとに分けるテキスト埋め込み HTTP attempt bucket の admission rate です。SYSTEM と AI provider 指定の埋め込み呼び出しに適用され、リトライも含みます。`ai_function_rate_limit_qps_chat` とは独立していますが、プロセス全体の `ai_function_max_inflight` 制限も適用されます。プロバイダーのクォータや送信負荷に合わせて値を下げ、プロバイダーと BE の両方に容量がある場合のみ上げてください。実行時の変更は即時反映され、BE の再起動は不要です。
+- 説明: 各 BE でエンドポイント、認証情報、capability ごとに分けるテキスト埋め込み HTTP attempt bucket の admission rate です。`ai_function_rate_limit_qps_chat` とは独立していますが、プロセス全体の `ai_function_max_inflight` 制限も適用されます。プロバイダーのクォータや送信負荷に合わせて値を下げ、プロバイダーと BE の両方に容量がある場合のみ上げてください。実行時の変更は即時反映され、BE の再起動は不要です。
 - 導入バージョン: -
 
 ### ai_function_max_inflight
@@ -312,6 +281,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 単位: -
 - 変更可能: はい
 - 説明: ゾーンマップインデックスのメモリキャッシュを有効にするかどうか。スキャンを高速化するためにゾーンマップインデックスを使用したい場合は、メモリキャッシュを推奨します。
+- 導入バージョン: -
+
+### exchange_sink_buffer_flush_threshold_bytes
+
+- デフォルト: 67108864
+- タイプ: Int
+- 単位: バイト
+- 変更可能: はい
+- 説明: シャッフル時に各 Exchange Sink ドライバーが送信前の行をバッファリングするために使用できる最大メモリ。シャッフル中、Exchange Sink は宛先のパイプラインドライバーごとに未満のチャンクを 1 つ保持し、チャンクが満杯になった時点でのみ送信します。これらのチャンクの合計サイズがこの上限を超えると、すべて直ちに送信されてクリアされます。クリア後もなお上限の半分を超えるメモリを保持している場合は、上限の半分以下になるまでチャンクが順に解放されます。`0` 以下の値を設定すると上限は無効になります。
 - 導入バージョン: -
 
 ### exchg_node_buffer_size_bytes
@@ -773,6 +751,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 説明: BufferControlBlockがデータを解放するまでの待機時間。
 - 導入バージョン: -
 
+### runtime_filter_worker_thread_num
+
+- デフォルト: 4
+- タイプ: Int
+- 単位: -
+- 変更可能: いいえ
+- 説明: 各 BE でグローバル Runtime Filter のマージと配信を行うスレッドの数。1 つの Runtime Filter のすべてのイベントは同じスレッドで処理され、異なる Runtime Filter は複数のスレッドに分散されます。`1` 以下の値を指定すると、単一のスレッドを使用します。
+- 導入バージョン: -
+
 ### scan_context_gc_interval_min
 
 - デフォルト: 5
@@ -850,8 +837,8 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - デフォルト: 60
 - タイプ: Int
 - 単位: パーセント
-- 変更可能: いいえ
-- 説明: BEプロセスメモリのうち、更新関連のメモリとキャッシュに予約される割合。起動時に `RuntimeEnv` は、更新用の `MemTracker` を process_mem_limit * clamp(update_memory_limit_percent, 0, 100) / 100 として計算します。`UpdateManager` もこの割合を使用して、プライマリインデックス/インデックスキャッシュの容量を決定します（インデックスキャッシュ容量 = RuntimeEnv::process_mem_limit * update_memory_limit_percent / 100）。HTTP設定更新ロジックは、更新マネージャーで `update_primary_index_memory_limit` を呼び出すコールバックを登録するため、設定が変更された場合、更新サブシステムに変更が適用されます。この値を増やすと、更新/プライマリインデックスパスにより多くのメモリが割り当てられ（他のプールで利用可能なメモリが減少します）、減らすと更新メモリとキャッシュ容量が減少します。値は0〜100の範囲にクランプされます。
+- 変更可能: はい
+- 説明: BEプロセスメモリのうち、更新関連のメモリとキャッシュに予約される割合。起動時に `RuntimeEnv` は、更新用の `MemTracker` を process_mem_limit * clamp(update_memory_limit_percent, 0, 100) / 100 として計算します。`UpdateManager` もこの割合を使用して、プライマリインデックス/インデックスキャッシュの容量を決定します（インデックスキャッシュ容量 = RuntimeEnv::process_mem_limit * update_memory_limit_percent / 100）。実行時にこの値を変更すると、更新用 `MemTracker` の上限、プライマリインデックスキャッシュの容量、およびそこから派生する update state、compaction state、プライマリインデックスブロックキャッシュの上限が再計算されます。この値を小さくすると、使用されていないプライマリインデックスキャッシュのエントリは即座に削除されますが、使用中のメモリは実行中のロードとコンパクションが完了した後に解放されます。この値を増やすと、更新/プライマリインデックスパスにより多くのメモリが割り当てられ（他のプールで利用可能なメモリが減少します）、減らすと更新メモリとキャッシュ容量が減少します。値は0〜100の範囲にクランプされます。
 - 導入バージョン: v3.2.0
 
 ### enable_vector_index_block_cache
@@ -1126,6 +1113,33 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 単位: 時間
 - 変更可能: はい
 - 説明: データロードログが予約される時間。
+- 導入バージョン: -
+
+### load_sink_close_thread_pool_num_max
+
+- デフォルト: 64
+- 型: Int
+- 単位: -
+- 変更可能: はい
+- 説明: ロード Sink の最終クローズ処理を実行するスレッドの最大数。共有データクラスタでは、このクローズ処理で結合トランザクションログをオブジェクトストレージに書き込みます。このスレッドプールで実行することで、遅い書き込みがパイプラインのポーラースレッドや実行スレッドをブロックしないようにします。すべてのスレッドが使用中の場合、後続のクローズ処理はスレッドプールのキューで待機します。キューの長さに上限はなく、クローズ処理が破棄されることはありません。値は 0 より大きい必要があります。BE または CN を再起動せずに実行時に変更できます。上限を下げても、実行中のクローズ処理は中断されません。初期化時に 1 つのワーカーを起動し、アイドル時も保持します。追加のワーカーは 500 ms アイドル状態が続くと終了できます。
+- 導入バージョン: -
+
+### enable_put_combinded_txn_log_parallel
+
+- デフォルト: true
+- 型: Boolean
+- 単位: -
+- 変更可能: はい
+- 説明: 共有データクラスタで、ロードの結合トランザクションログを並列に書き込むかどうか。ロード Sink のクローズ時には、ロードが対象とした各パーティションについて 1 つの結合トランザクションログをオブジェクトストレージに書き込みます。`true` に設定すると、これらの書き込みは専用のスレッドプールで並行して実行され（スレッド数の上限は `put_combined_txn_log_thread_pool_num_max` で制御され、デフォルトは `64`）。`false` に設定すると、パーティションごとに順番に書き込みます。どちらの場合も、ロードはすべての書き込みの完了を待ち、いずれかの書き込みが失敗するとロードは失敗します。
+- 導入バージョン: -
+
+### put_combined_txn_log_thread_pool_num_max
+
+- デフォルト: 64
+- 型: Int
+- 単位: -
+- 変更可能: はい
+- 説明: 共有データクラスタで、結合トランザクションログをオブジェクトストレージに書き込むスレッドプールのスレッド数の上限。`enable_put_combinded_txn_log_parallel` が `true` の場合、ロードが対象とした各パーティションの結合トランザクションログは、このスレッドプールで並行して書き込まれます。すべてのスレッドが使用中の場合、後続の書き込みはスレッドプールのキューで待機します。キューの長さに上限はありません。BE または CN を再起動せずに実行時に変更できます。`0` 以下の値は `1` として扱われます。上限を下げても、実行中の書き込みは中断されません。アイドル状態のスレッドは 500 ms 後に終了します。
 - 導入バージョン: -
 
 ### load_process_max_memory_limit_bytes

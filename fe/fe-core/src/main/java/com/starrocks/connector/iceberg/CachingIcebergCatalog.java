@@ -17,6 +17,7 @@ package com.starrocks.connector.iceberg;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.Weigher;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.Database;
@@ -36,6 +37,7 @@ import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.DeleteFileIndexCache;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.PartitionSpec;
@@ -65,6 +67,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.stream.Collectors;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -89,6 +92,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private final IcebergCatalogProperties icebergProperties;
     private final com.github.benmanes.caffeine.cache.Cache<String, Set<DataFile>> dataFileCache;
     private final com.github.benmanes.caffeine.cache.Cache<String, Set<DeleteFile>> deleteFileCache;
+    private final DeleteFileIndexCache deleteFileIndexCache;
     private final Map<IcebergTableName, Set<String>> metaFileCacheMap = new ConcurrentHashMap<>(); // table -> metadata file paths
     private final Map<IcebergTableName, Long> tableLatestAccessTime = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestRefreshTime = new ConcurrentHashMap<>();
@@ -218,6 +222,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                             cause));
                 })
                 .build();
+        // Same budget as the delete file cache: an index references the cached delete files, and is weighed by
+        // what it would keep alive after the delete file cache evicts them.
+        this.deleteFileIndexCache = new DeleteFileIndexCache(icebergProperties.getIcebergMetaCacheTtlSec(),
+                deleteFileCacheSize, executorService, this::estimateContentFilesSize);
 
         this.backgroundExecutor = executorService;
     }
@@ -375,8 +383,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                     new IcebergTableName(icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), snapshotId);
             Map<String, Partition> cacheValue = partitionCache.getIfPresent(key);
             if (cacheValue == null) {
-                backgroundExecutor.submit(() -> partitionCache.refresh(key));
-                return null;
+                try {
+                    backgroundExecutor.submit(() -> partitionCache.refresh(key));
+                    return null;
+                } catch (RejectedExecutionException e) {
+                    // The connector was shut down while this query was in flight; load synchronously instead.
+                }
             }
         }
         return IcebergCatalog.super.listPartitionNames(icebergTable, requestContext, executorService);
@@ -541,6 +553,11 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
     @Override
+    public void shutdown() {
+        delegate.shutdown();
+    }
+
+    @Override
     public void invalidateCache(String dbName, String tableName) {
         IcebergTableName key = new IcebergTableName(dbName, tableName);
         invalidateCache(key);
@@ -558,12 +575,19 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             dataFileCache.invalidateAll(paths);
             deleteFileCache.invalidateAll(paths);
         }
+        deleteFileIndexCache.invalidate(key);
+    }
+
+    @VisibleForTesting
+    DeleteFileIndexCache getDeleteFileIndexCache() {
+        return deleteFileIndexCache;
     }
 
     @Override
     public StarRocksIcebergTableScan getTableScan(Table table, StarRocksIcebergTableScanContext scanContext) {
         scanContext.setDataFileCache(dataFileCache);
         scanContext.setDeleteFileCache(deleteFileCache);
+        scanContext.setDeleteFileIndexCache(deleteFileIndexCache);
         scanContext.setMetaFileCacheMap(metaFileCacheMap);
         scanContext.setDataFileCacheWithMetrics(icebergProperties.isIcebergManifestCacheWithColumnStatistics());
         scanContext.setEnableCacheDataFileIdentifierColumnMetrics(
@@ -588,6 +612,27 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private Caffeine<Object, Object> newCacheBuilderWithMaximumSize(long expiresAfterWriteSec, long refreshInterval,
                                                                     long maximumSize) {
         return newCacheBuilder(expiresAfterWriteSec, refreshInterval).maximumSize(maximumSize);
+    }
+
+    // Returns the cached data files of this manifest whose locations are in `locations`, or null unless the
+    // manifest is cached completely (its live file count is known and matches the cached entry).
+    public Map<String, DataFile> findCachedDataFiles(ManifestFile manifest, Set<String> locations) {
+        Set<DataFile> files = dataFileCache.getIfPresent(manifest.path());
+        Integer added = manifest.addedFilesCount();
+        Integer existing = manifest.existingFilesCount();
+        if (files == null || added == null || existing == null || files.size() != added + existing) {
+            return null;
+        }
+        Map<String, DataFile> found = new HashMap<>();
+        for (DataFile file : files) {
+            if (locations.contains(file.location())) {
+                if (file.specId() != manifest.partitionSpecId()) {
+                    return null;
+                }
+                found.put(file.location(), file);
+            }
+        }
+        return found;
     }
 
     // We still allow reads from caches, but skip populating or refreshing them when this flag is set.

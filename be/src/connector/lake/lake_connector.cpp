@@ -565,6 +565,13 @@ Status LakeDataSource::init_reader_params(const std::vector<OlapScanRange*>& key
     _params.pred_tree = PredicateTree::create(std::move(pushdown_pred_root));
     _non_pushdown_pred_tree = PredicateTree::create(std::move(non_pushdown_pred_root));
 
+    // The FE marks a column unused when only pushed-down conjuncts read it, but normalizing a conjunct can
+    // fold it away without a column predicate (`c NOT IN (.., NULL)` under OR never holds, so the OR drops it).
+    // Such a column is neither filtered on nor output, and the segment iterator's late-materialization layout
+    // has no place for it, so output it instead.
+    const auto& pushdown_cids = _params.pred_tree.column_ids();
+    std::erase_if(_unused_output_column_ids, [&](uint32_t cid) { return !pushdown_cids.contains(cid); });
+
     for (const auto& cid : _non_pushdown_pred_tree.column_ids()) {
         _unused_output_column_ids.erase(cid);
     }
@@ -1316,6 +1323,7 @@ void LakeDataSource::init_counter(RuntimeState* state) {
     _rows_read_counter = ADD_COUNTER(_runtime_profile, "RowsRead", TUnit::UNIT);
 
     _create_seg_iter_timer = ADD_TIMER(_runtime_profile, "CreateSegmentIter");
+    _segment_zone_map_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "SegmentZoneMapFilter", "CreateSegmentIter");
 
     _read_compressed_counter = ADD_COUNTER(_runtime_profile, "CompressedBytesRead", TUnit::BYTES);
     _read_uncompressed_counter = ADD_COUNTER(_runtime_profile, "UncompressedBytesRead", TUnit::BYTES);
@@ -1353,6 +1361,14 @@ void LakeDataSource::init_counter(RuntimeState* state) {
             ADD_CHILD_COUNTER(_runtime_profile, "ShortKeyRangeNumber", TUnit::UNIT, segment_init_name);
     _column_iterator_init_timer = ADD_CHILD_TIMER(_runtime_profile, "ColumnIteratorInit", segment_init_name);
     _bitmap_index_iterator_init_timer = ADD_CHILD_TIMER(_runtime_profile, "BitmapIndexIteratorInit", segment_init_name);
+    _segment_init_prepare_timer = ADD_CHILD_TIMER(_runtime_profile, "SegmentInitPrepare", segment_init_name);
+    _rowid_range_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "RowidRangeFilter", segment_init_name);
+    _precomputed_range_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "PrecomputedRangeFilter", segment_init_name);
+    _tablet_range_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "TabletRangeFilter", segment_init_name);
+    _del_vector_apply_timer = ADD_CHILD_TIMER(_runtime_profile, "DelVectorApply", segment_init_name);
+    _segment_init_finalize_timer = ADD_CHILD_TIMER(_runtime_profile, "SegmentInitFinalize", segment_init_name);
+    _rewrite_predicates_timer = ADD_CHILD_TIMER(_runtime_profile, "RewritePredicates", segment_init_name);
+    _init_context_timer = ADD_CHILD_TIMER(_runtime_profile, "InitContext", segment_init_name);
     _zone_map_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "ZoneMapIndexFilter", segment_init_name);
     _rows_key_range_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "ShortKeyFilter", segment_init_name);
     _bf_filter_timer = ADD_CHILD_TIMER(_runtime_profile, "BloomFilterFilter", segment_init_name);
@@ -1438,12 +1454,35 @@ void LakeDataSource::init_counter(RuntimeState* state) {
     _lake_late_rf_reinit_counter =
             ADD_CHILD_COUNTER(_runtime_profile, "LateRuntimeFilterReinit", TUnit::UNIT, prepared_split_name);
     _lake_prepared_seed_timer = ADD_CHILD_TIMER(_runtime_profile, "SeedPrepareTime", prepared_split_name);
+    _lake_prepared_tablet_timer = ADD_CHILD_TIMER(_runtime_profile, "TabletPrepareTime", prepared_split_name);
     _lake_initial_coarse_counter =
             ADD_CHILD_COUNTER(_runtime_profile, "InitialCoarseMorsels", TUnit::UNIT, prepared_split_name);
     _lake_refined_counter = ADD_CHILD_COUNTER(_runtime_profile, "RefinedMorsels", TUnit::UNIT, prepared_split_name);
     // Breakdown of SeedPrepareTime: where the seed's one-time per-segment prune spends its time / IO.
     _lake_seed_io_timer = ADD_CHILD_TIMER(_runtime_profile, "SeedIOTime", "SeedPrepareTime");
     _lake_seed_io_count_counter = ADD_CHILD_COUNTER(_runtime_profile, "SeedIOCount", TUnit::UNIT, "SeedPrepareTime");
+    _lake_seed_io_remote_timer = ADD_CHILD_TIMER(_runtime_profile, "SeedIOTimeRemote", "SeedPrepareTime");
+    _lake_seed_io_count_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "SeedIOCountRemote", TUnit::UNIT, "SeedPrepareTime");
+    _lake_seed_bytes_read_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "SeedBytesReadRemote", TUnit::BYTES, "SeedPrepareTime");
+    // Breakdown of TabletPrepareTime: opening the segments of every rowset and loading their short key indexes.
+    const std::string tablet_prepare_name = "TabletPrepareTime";
+    _lake_tablet_prepare_segment_open_timer =
+            ADD_CHILD_TIMER(_runtime_profile, "TabletPrepareSegmentOpenTime", tablet_prepare_name);
+    _lake_tablet_prepare_segments_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "TabletPrepareSegments", TUnit::UNIT, tablet_prepare_name);
+    _lake_tablet_prepare_segments_opened_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "TabletPrepareSegmentsOpened", TUnit::UNIT, tablet_prepare_name);
+    _lake_tablet_prepare_io_timer = ADD_CHILD_TIMER(_runtime_profile, "TabletPrepareIOTime", tablet_prepare_name);
+    _lake_tablet_prepare_io_count_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "TabletPrepareIOCount", TUnit::UNIT, tablet_prepare_name);
+    _lake_tablet_prepare_io_remote_timer =
+            ADD_CHILD_TIMER(_runtime_profile, "TabletPrepareIOTimeRemote", tablet_prepare_name);
+    _lake_tablet_prepare_io_count_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "TabletPrepareIOCountRemote", TUnit::UNIT, tablet_prepare_name);
+    _lake_tablet_prepare_bytes_read_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "TabletPrepareBytesReadRemote", TUnit::BYTES, tablet_prepare_name);
     _lake_seed_segment_init_timer = ADD_CHILD_TIMER(_runtime_profile, "SeedSegmentInitTime", "SeedPrepareTime");
 
     const std::string seed_vector_index_name = "SeedVectorIndex";
@@ -1532,6 +1571,7 @@ void LakeDataSource::update_realtime_counter(Chunk* chunk) {
 void LakeDataSource::update_counter(RuntimeState* state) {
     const auto& reader_stats = _reader->stats();
     COUNTER_UPDATE(_create_seg_iter_timer, reader_stats.create_segment_iter_ns);
+    COUNTER_UPDATE(_segment_zone_map_filter_timer, reader_stats.segment_zone_map_filter_ns);
     COUNTER_UPDATE(_rows_read_counter, _num_rows_read);
 
     COUNTER_UPDATE(_io_timer, reader_stats.io_ns);
@@ -1551,6 +1591,14 @@ void LakeDataSource::update_counter(RuntimeState* state) {
     COUNTER_UPDATE(_seg_init_timer, reader_stats.segment_init_ns);
     COUNTER_UPDATE(_column_iterator_init_timer, reader_stats.column_iterator_init_ns);
     COUNTER_UPDATE(_bitmap_index_iterator_init_timer, reader_stats.bitmap_index_iterator_init_ns);
+    COUNTER_UPDATE(_segment_init_prepare_timer, reader_stats.segment_init_prepare_ns);
+    COUNTER_UPDATE(_rowid_range_filter_timer, reader_stats.rowid_range_filter_ns);
+    COUNTER_UPDATE(_precomputed_range_filter_timer, reader_stats.precomputed_range_filter_ns);
+    COUNTER_UPDATE(_tablet_range_filter_timer, reader_stats.tablet_range_filter_ns);
+    COUNTER_UPDATE(_del_vector_apply_timer, reader_stats.del_vector_apply_ns);
+    COUNTER_UPDATE(_segment_init_finalize_timer, reader_stats.segment_init_finalize_ns);
+    COUNTER_UPDATE(_rewrite_predicates_timer, reader_stats.rewrite_predicates_ns);
+    COUNTER_UPDATE(_init_context_timer, reader_stats.init_context_ns);
     COUNTER_UPDATE(_zone_map_filter_timer, reader_stats.zone_map_filter_ns);
     COUNTER_UPDATE(_rows_key_range_filter_timer, reader_stats.rows_key_range_filter_ns);
     COUNTER_UPDATE(_bf_filter_timer, reader_stats.bf_filter_ns);
@@ -1610,9 +1658,22 @@ void LakeDataSource::update_counter(RuntimeState* state) {
     COUNTER_UPDATE(_lake_reusable_segment_iter_created_counter, reader_stats.lake_reusable_segment_iter_created);
     COUNTER_UPDATE(_lake_reusable_segment_iter_reused_counter, reader_stats.lake_reusable_segment_iter_reused);
     COUNTER_UPDATE(_lake_prepared_seed_timer, reader_stats.lake_prepared_seed_ns);
+    COUNTER_UPDATE(_lake_prepared_tablet_timer, reader_stats.lake_prepared_tablet_prepare_ns);
+    COUNTER_UPDATE(_lake_tablet_prepare_segment_open_timer, reader_stats.lake_prepared_tablet_segment_open_ns);
+    COUNTER_UPDATE(_lake_tablet_prepare_segments_counter, reader_stats.lake_prepared_tablet_segments);
+    COUNTER_UPDATE(_lake_tablet_prepare_segments_opened_counter, reader_stats.lake_prepared_tablet_segments_opened);
+    COUNTER_UPDATE(_lake_tablet_prepare_io_timer, reader_stats.lake_prepared_tablet_io_ns);
+    COUNTER_UPDATE(_lake_tablet_prepare_io_count_counter, reader_stats.lake_prepared_tablet_io_count);
+    COUNTER_UPDATE(_lake_tablet_prepare_io_remote_timer, reader_stats.lake_prepared_tablet_io_remote_ns);
+    COUNTER_UPDATE(_lake_tablet_prepare_io_count_remote_counter, reader_stats.lake_prepared_tablet_io_count_remote);
+    COUNTER_UPDATE(_lake_tablet_prepare_bytes_read_remote_counter, reader_stats.lake_prepared_tablet_bytes_read_remote);
     COUNTER_UPDATE(_lake_seed_io_timer, reader_stats.lake_prepared_seed_io_ns);
     COUNTER_UPDATE(_lake_seed_io_count_counter, reader_stats.lake_prepared_seed_io_count);
+    COUNTER_UPDATE(_lake_seed_io_remote_timer, reader_stats.lake_prepared_seed_io_remote_ns);
+    COUNTER_UPDATE(_lake_seed_io_count_remote_counter, reader_stats.lake_prepared_seed_io_count_remote);
+    COUNTER_UPDATE(_lake_seed_bytes_read_remote_counter, reader_stats.lake_prepared_seed_bytes_read_remote);
     COUNTER_UPDATE(_lake_seed_segment_init_timer, reader_stats.lake_prepared_seed_segment_init_ns);
+
     COUNTER_UPDATE(_lake_seed_vector_index_timer,
                    reader_stats.lake_prepared_seed_vector_index_load_ns +
                            reader_stats.lake_prepared_seed_get_row_ranges_by_vector_index_ns);
@@ -1803,6 +1864,40 @@ void LakeDataSource::update_counter(RuntimeState* state) {
         COUNTER_UPDATE(c, reader_stats.json_flatten_ns);
         FlatJsonMetrics::instance()->flat_json_flatten_duration_ns_total.increment(reader_stats.json_flatten_ns);
     }
+    // Data sampling. The lake path reported none of these, so on a shared-data cluster the whole cost of
+    // sampling was invisible. SampleTime takes sample_time_ns, the elapsed time, not the population count.
+    //
+    // Parented on SegmentInit rather than SegmentRead: _apply_data_sampling() runs from
+    // _init_scan_range_and_context(), inside segment_init_ns, so SegmentRead is a sibling subtree the time
+    // is not part of -- SampleTime there could exceed its own parent. The shared-nothing block in
+    // OlapChunkSource::_update_counter still uses SegmentRead; that counter already ships, so moving it
+    // belongs with the counter re-parenting work rather than here.
+    //
+    // Not covered: with enable_lake_prepared_physical_split_scan on (default off), sampling runs once in
+    // the seed against its own prepare statistics and the precomputed children skip it, so these read
+    // zero. TabletReader::refine_initial_coarse_split_and_append_refined_tasks folds only selected seed
+    // fields into lake_prepared_seed_*, and carries no sampling breakdown; adding one is part of the
+    // seed-parity work, not of this change.
+    const std::string sample_parent_name = "SegmentInit";
+    if (_params.sample_options.enable_sampling) {
+        double sample_percent = _params.sample_options.__isset.probability_percent_v2
+                                        ? _params.sample_options.probability_percent_v2
+                                        : static_cast<double>(_params.sample_options.probability_percent);
+        _runtime_profile->add_info_string("SampleMethod", to_string(_params.sample_options.sample_method));
+        _runtime_profile->add_info_string("SamplePercent", std::to_string(sample_percent) + "%");
+        COUNTER_UPDATE(ADD_CHILD_TIMER(_runtime_profile, "SampleTime", sample_parent_name),
+                       reader_stats.sample_time_ns);
+        COUNTER_UPDATE(ADD_CHILD_TIMER(_runtime_profile, "SampleBuildHistogramTime", sample_parent_name),
+                       reader_stats.sample_build_histogram_time_ns);
+        COUNTER_UPDATE(ADD_CHILD_COUNTER(_runtime_profile, "SampleSize", TUnit::UNIT, sample_parent_name),
+                       reader_stats.sample_size);
+        COUNTER_UPDATE(ADD_CHILD_COUNTER(_runtime_profile, "SamplePopulationSize", TUnit::UNIT, sample_parent_name),
+                       reader_stats.sample_population_size);
+        COUNTER_UPDATE(
+                ADD_CHILD_COUNTER(_runtime_profile, "SampleBuildHistogramCount", TUnit::UNIT, sample_parent_name),
+                reader_stats.sample_build_histogram_count);
+    }
+
     if (state != nullptr && state->query_runtime_state() != nullptr) {
         state->query_runtime_state()->incr_read_stats(reader_stats.io_count_local_disk, reader_stats.io_count_remote);
     }

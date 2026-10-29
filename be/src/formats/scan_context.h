@@ -110,6 +110,8 @@ struct FormatScannerStats {
     int64_t column_reader_init_ns = 0;
     // dict filter
     int64_t group_chunk_read_ns = 0;
+    // compacting the active columns to the rows that passed the predicates and runtime filters
+    int64_t group_chunk_filter_ns = 0;
     int64_t group_dict_filter_ns = 0;
     int64_t group_dict_decode_ns = 0;
     // io coalesce
@@ -124,6 +126,10 @@ struct FormatScannerStats {
     int64_t page_index_ns = 0;
     int64_t total_row_groups = 0;
     int64_t filtered_row_groups = 0;
+    // Row groups / ORC stripes / data files whose rows are all in the deletion bitmap, skipped before any IO.
+    int64_t deleted_row_groups_skipped = 0;
+    int64_t deleted_stripes_skipped = 0;
+    int64_t deleted_files_skipped = 0;
 
     // late materialize round-by-round
     int64_t group_min_round_cost = 0;
@@ -311,6 +317,12 @@ struct FormatScanContext {
     } split;
 
     bool is_lazy_materialization_slot(SlotId slot_id) const;
+
+    // A one-row column of `type` holding an Iceberg initial-default as FE serializes it, for a column or struct
+    // subfield missing from a data file. TIME arrives as "HH:MM[:SS[.ffffff]]" and is stored as whole seconds, like
+    // the file readers do. NotSupported for a type the value cannot be parsed into.
+    static StatusOr<MutableColumnPtr> create_initial_default_column(const TypeDescriptor& type, bool nullable,
+                                                                    const std::string& value);
     bool can_use_count_optimization() const;
     bool has_count_column() const { return _count_slot.has_value(); }
     bool can_use_min_max_optimization() const;

@@ -84,6 +84,7 @@ import com.starrocks.sql.ast.PartitionDesc;
 import com.starrocks.sql.ast.PartitionKeyDesc;
 import com.starrocks.sql.ast.PartitionValue;
 import com.starrocks.sql.ast.QualifiedName;
+import com.starrocks.sql.ast.QueryPeriod;
 import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.RangePartitionDesc;
@@ -141,6 +142,7 @@ import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import com.starrocks.type.TypeFactory;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.iceberg.SnapshotRef;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -1072,7 +1074,14 @@ public class AnalyzerUtils {
     }
 
     public static void copyOlapTable(StatementBase statementBase, Set<OlapTable> olapTables) {
-        new AnalyzerUtils.OlapTableCollector(olapTables).visit(statementBase);
+        new AnalyzerUtils.OlapTableCollector(olapTables, true).visit(statementBase);
+    }
+
+    /** The olap tables {@link #copyOlapTable} would copy, left in place. */
+    public static Set<OlapTable> collectOlapTablesToCopy(StatementBase statementBase) {
+        Set<OlapTable> olapTables = new HashSet<>();
+        new AnalyzerUtils.OlapTableCollector(olapTables, false).visit(statementBase);
+        return olapTables;
     }
 
     public static void collectSourceTables(StatementBase statementBase, List<Table> sourceTables) {
@@ -1355,10 +1364,13 @@ public class AnalyzerUtils {
     private static class OlapTableCollector extends TableCollector {
         private Set<OlapTable> olapTables;
         private Map<TableIndexId, OlapTable> idMap;
+        // false to only collect the originals, leaving the statement on them
+        private final boolean copy;
 
-        public OlapTableCollector(Set<OlapTable> tables) {
+        public OlapTableCollector(Set<OlapTable> tables, boolean copy) {
             this.olapTables = tables;
             this.idMap = new HashMap<>();
+            this.copy = copy;
         }
 
         /**
@@ -1450,6 +1462,10 @@ public class AnalyzerUtils {
                 return null;
             }
             OlapTable table = (OlapTable) originalTable;
+            if (!copy) {
+                olapTables.add(table);
+                return null;
+            }
             TableIndexId tableIndexId = new TableIndexId(table.getId(), table.getBaseIndexMetaId());
             OlapTable existed = idMap.get(tableIndexId);
             if (existed != null) {
@@ -2503,6 +2519,28 @@ public class AnalyzerUtils {
             }
             return MetaUtils.getSessionAwareTable(session, null, tableName);
         });
+    }
+
+    /**
+     * Points the target relation of an UPDATE, DELETE or MERGE on an Iceberg branch at that branch, so the
+     * statement reads the rows it rewrites from the branch. The commit goes to the same branch. Like Iceberg, the
+     * branch is read and written with the table's current schema.
+     */
+    public static void setIcebergWriteBranch(TableRelation targetRelation, Table table, String branch) {
+        if (branch == null) {
+            return;
+        }
+        if (!(table instanceof IcebergTable icebergTable)) {
+            throw new SemanticException("Only an Iceberg table can be written on a branch");
+        }
+        SnapshotRef snapshotRef = icebergTable.getNativeTable().refs().get(branch);
+        if (snapshotRef == null) {
+            throw new SemanticException("Cannot find snapshot with reference name: %s", branch);
+        }
+        if (!snapshotRef.isBranch()) {
+            throw new SemanticException("%s is a tag, not a branch", branch);
+        }
+        targetRelation.setQueryPeriod(new QueryPeriod(QueryPeriod.PeriodType.VERSION, new StringLiteral(branch)));
     }
 
     public static TableRef normalizedTableRef(TableRef tableRef, ConnectContext context) {

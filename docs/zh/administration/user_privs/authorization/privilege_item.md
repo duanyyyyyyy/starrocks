@@ -22,6 +22,15 @@ import PrivWarehouse from '../../../_assets/commonMarkdown/priv_warehouse.mdx'
 
 <PrivCreateWarehouse />
 
+### AI FUNCTION / AI PROVIDER {/* #ai-function-privileges */}
+
+| 对象 | 权限 | 用途 |
+| --- | --- | --- |
+| AI FUNCTION | USAGE | 使用指定的 AI 函数。 |
+| AI PROVIDER | USAGE | 使用指定的 AI Provider。 |
+
+> 说明：调用 AI 函数需要同时具备函数和所选 Provider 的 USAGE 权限，包括默认 Provider。管理 Provider 需要 SYSTEM OPERATE 权限。
+
 ### 资源组权限 (RESOURCE GROUP)
 
 | 权限  | 用途                                                         |

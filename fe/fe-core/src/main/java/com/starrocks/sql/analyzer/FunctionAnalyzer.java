@@ -288,7 +288,7 @@ public class FunctionAnalyzer {
             analyzeBuiltinAggFunction(argFuncNameWithoutIf, functionParamsWithOutIf, functionCallWithoutIf);
         }
 
-        if (fn != null && fn.isAi()) {
+        if (fn != null && fn.isAI()) {
             AIFunctionAnalyzer.analyze(functionCallExpr);
         }
     }
@@ -1042,7 +1042,6 @@ public class FunctionAnalyzer {
                                                         List<Type> newArgumentTypes) {
         Function fn = null;
         String fnName = node.getFunctionName();
-        // throw exception direct
         if (fnName.equalsIgnoreCase("typeof") && argumentTypes.length == 1) {
             // For the typeof function, the parameter type of the function is the result of this function.
             // At this time, the parameter type has been obtained. You can directly replace the current
@@ -1870,7 +1869,8 @@ public class FunctionAnalyzer {
                 newNames[j] = names[j];
             } else {
                 // Parameter not provided - use default value
-                newExprs[j] = fn.getDefaultNamedExpr(names[j]);
+                Expr defaultExpr = fn.getDefaultNamedExpr(names[j]);
+                newExprs[j] = defaultExpr == null ? null : defaultExpr.clone();
                 newNames[j] = names[j];
                 Preconditions.checkState(newExprs[j] != null,
                         "Missing default value for parameter: " + names[j]);
@@ -1907,7 +1907,7 @@ public class FunctionAnalyzer {
             com.starrocks.sql.ast.expression.Expr defaultExpr = fn.getDefaultNamedExpr(names[i]);
             Preconditions.checkState(defaultExpr != null,
                     "Missing default value for parameter: " + names[i]);
-            newExprs.add(defaultExpr);
+            newExprs.add(defaultExpr.clone());
         }
         params.setExprs(newExprs);
     }

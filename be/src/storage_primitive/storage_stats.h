@@ -82,7 +82,38 @@ struct OlapReaderStatistics {
     int64_t rows_key_range_filter_ns = 0;
     int64_t bf_filter_ns = 0;
 
+    // ------ Remaining SegmentInit phases ------
+    // Everything below runs inside segment_init_ns but had no timer of its own, so its cost showed up
+    // only as the gap between SegmentInit and the sum of its children. Each is expected to be small;
+    // they exist so that the residual is provably small rather than merely assumed to be.
+    // Only the lake (shared-data) scan path reports these. SegmentIterator is shared, so it fills the
+    // fields on both paths, but OlapChunkSource registers no counters for them: on shared-nothing they
+    // stay inside the SegmentInit residual, exactly as before.
+    // On the lake prepared-split path these same functions run under _get_prepared_pruned_row_ranges,
+    // which writes into its own statistics object, so seed time never lands in these counters. Note that
+    // it does not land anywhere else either: TabletReader::refine_initial_coarse_split_and_append_refined_tasks
+    // folds only a selected set of fields into lake_prepared_seed_*, and none of the phases below is in it.
+    // Those phases also do not re-run in the precomputed child, so on that path they stay part of the
+    // unattributed remainder under SeedSegmentInitTime. Closing that is seed-parity work, not this change.
+    int64_t segment_init_prepare_ns = 0;     // _init_column_access_paths + _check_low_cardinality_optimization
+    int64_t rowid_range_filter_ns = 0;       // _get_row_ranges_by_rowid_range
+    int64_t precomputed_range_filter_ns = 0; // _apply_precomputed_scan_range
+    int64_t tablet_range_filter_ns = 0;      // _apply_tablet_range
+    int64_t del_vector_apply_ns = 0;         // _apply_del_vector
+    // split/reverse + range iterator construction + sparse-to-io-range conversion, i.e. the tail of
+    // _init_scan_range_and_context after the last filtering phase.
+    int64_t segment_init_finalize_ns = 0;
+
+    // Predicate rewrite and context construction inside segment_init_ns. Reported by the lake scan path only.
+    int64_t rewrite_predicates_ns = 0;
+    // _init_context and _init_column_predicates together form the context build.
+    int64_t init_context_ns = 0;
+
     int64_t segment_stats_filtered = 0;
+    // Time spent in Segment::_prune_by_segment_zone_map, the counterpart of segment_stats_filtered.
+    // This runs while the segment iterator is being created, not inside segment_init_ns, so the lake
+    // connector reports it under CreateSegmentIter rather than under SegmentInit.
+    int64_t segment_zone_map_filter_ns = 0;
     int64_t rows_key_range_filtered = 0;
     int64_t rows_after_key_range = 0;
     int64_t rows_key_range_num = 0;
@@ -163,6 +194,10 @@ struct OlapReaderStatistics {
     int64_t prefetch_wait_finish_ns = 0;
     int64_t prefetch_pending_ns = 0;
 
+    // Segments whose footer was read on behalf of this reader, i.e. that were not already open. Only the
+    // callers that pass their statistics to Segment::open count them.
+    int64_t segments_opened = 0;
+
     int64_t lake_prepared_rowsets = 0;
     int64_t lake_prepared_segments = 0;
     int64_t lake_prepared_scan_rows = 0;
@@ -176,6 +211,9 @@ struct OlapReaderStatistics {
     // OlapReaderStatistics: where the seed's one-time per-segment prune spends its time / IO.
     int64_t lake_prepared_seed_io_ns = 0;
     int64_t lake_prepared_seed_io_count = 0;
+    int64_t lake_prepared_seed_io_remote_ns = 0;
+    int64_t lake_prepared_seed_io_count_remote = 0;
+    int64_t lake_prepared_seed_bytes_read_remote = 0;
     int64_t lake_prepared_seed_segment_init_ns = 0;
     int64_t lake_prepared_seed_vector_index_load_ns = 0;
     int64_t lake_prepared_seed_get_row_ranges_by_vector_index_ns = 0;
@@ -193,6 +231,20 @@ struct OlapReaderStatistics {
     int64_t lake_prepared_seed_zonemap_filtered_rows = 0;
     int64_t lake_prepared_seed_bf_ns = 0;
     int64_t lake_prepared_seed_bf_filtered_rows = 0;
+    // Time (ns) the first scan task of a tablet spends preparing it for the prepared split: opening every
+    // segment of every rowset (reading the footers that are not open yet) and building the initial coarse
+    // splits (loading the short key index of each segment when the scan has key ranges). The fields below
+    // break it down; the IO ones cover the footer and short key index reads.
+    int64_t lake_prepared_tablet_prepare_ns = 0;
+    int64_t lake_prepared_tablet_segment_open_ns = 0;
+    // Candidate segment slots in rowsets reached by tablet preparation, including failed loads.
+    int64_t lake_prepared_tablet_segments = 0;
+    int64_t lake_prepared_tablet_segments_opened = 0;
+    int64_t lake_prepared_tablet_io_ns = 0;
+    int64_t lake_prepared_tablet_io_count = 0;
+    int64_t lake_prepared_tablet_io_remote_ns = 0;
+    int64_t lake_prepared_tablet_io_count_remote = 0;
+    int64_t lake_prepared_tablet_bytes_read_remote = 0;
     // ------ for lake tablet ------
 
     // ------ for json type, to count flat column ------
@@ -247,10 +299,19 @@ struct OlapReaderStatistics {
         segment_init_ns += other.segment_init_ns;
         column_iterator_init_ns += other.column_iterator_init_ns;
         bitmap_index_iterator_init_ns += other.bitmap_index_iterator_init_ns;
+        segment_init_prepare_ns += other.segment_init_prepare_ns;
+        rowid_range_filter_ns += other.rowid_range_filter_ns;
+        precomputed_range_filter_ns += other.precomputed_range_filter_ns;
+        tablet_range_filter_ns += other.tablet_range_filter_ns;
+        del_vector_apply_ns += other.del_vector_apply_ns;
+        segment_init_finalize_ns += other.segment_init_finalize_ns;
+        rewrite_predicates_ns += other.rewrite_predicates_ns;
+        init_context_ns += other.init_context_ns;
         zone_map_filter_ns += other.zone_map_filter_ns;
         rows_key_range_filter_ns += other.rows_key_range_filter_ns;
         bf_filter_ns += other.bf_filter_ns;
         segment_stats_filtered += other.segment_stats_filtered;
+        segment_zone_map_filter_ns += other.segment_zone_map_filter_ns;
         rows_key_range_filtered += other.rows_key_range_filtered;
         rows_after_key_range += other.rows_after_key_range;
         rows_key_range_num += other.rows_key_range_num;
@@ -318,6 +379,18 @@ struct OlapReaderStatistics {
         lake_prepared_seed_ns += other.lake_prepared_seed_ns;
         lake_prepared_seed_io_ns += other.lake_prepared_seed_io_ns;
         lake_prepared_seed_io_count += other.lake_prepared_seed_io_count;
+        lake_prepared_seed_io_remote_ns += other.lake_prepared_seed_io_remote_ns;
+        lake_prepared_seed_io_count_remote += other.lake_prepared_seed_io_count_remote;
+        lake_prepared_seed_bytes_read_remote += other.lake_prepared_seed_bytes_read_remote;
+        lake_prepared_tablet_prepare_ns += other.lake_prepared_tablet_prepare_ns;
+        lake_prepared_tablet_segment_open_ns += other.lake_prepared_tablet_segment_open_ns;
+        lake_prepared_tablet_segments += other.lake_prepared_tablet_segments;
+        lake_prepared_tablet_segments_opened += other.lake_prepared_tablet_segments_opened;
+        lake_prepared_tablet_io_ns += other.lake_prepared_tablet_io_ns;
+        lake_prepared_tablet_io_count += other.lake_prepared_tablet_io_count;
+        lake_prepared_tablet_io_remote_ns += other.lake_prepared_tablet_io_remote_ns;
+        lake_prepared_tablet_io_count_remote += other.lake_prepared_tablet_io_count_remote;
+        lake_prepared_tablet_bytes_read_remote += other.lake_prepared_tablet_bytes_read_remote;
         lake_prepared_seed_segment_init_ns += other.lake_prepared_seed_segment_init_ns;
         lake_prepared_seed_vector_index_load_ns += other.lake_prepared_seed_vector_index_load_ns;
         lake_prepared_seed_get_row_ranges_by_vector_index_ns +=

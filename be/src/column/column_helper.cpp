@@ -109,6 +109,10 @@ void ColumnHelper::merge_filters(const Columns& columns, Filter* __restrict filt
 }
 
 void ColumnHelper::mark_binary_columns(const ColumnPtr& column, const TypeDescriptor& type) {
+    // A const-null column carries no binary data (its data column may not be a BinaryColumn).
+    if (column->only_null()) {
+        return;
+    }
     const Column* data_column = get_data_column(column);
 
     switch (type.type) {
@@ -416,6 +420,8 @@ MutableColumnPtr ColumnHelper::create_column(const TypeDescriptor& type_desc, bo
 struct ColumnBuilder {
     template <LogicalType ltype>
     MutableColumnPtr operator()(const TypeDescriptor& type_desc, size_t size) {
+        // ARRAY/MAP/STRUCT are built recursively from type_desc.children by the caller and never
+        // reach this dispatch; getting here with one means the caller lost the children.
         if constexpr (ltype == TYPE_UNKNOWN || ltype == TYPE_NULL || ltype == TYPE_BINARY || ltype == TYPE_DECIMAL ||
                       lt_is_collection<ltype>) {
             LOG(FATAL) << "Unsupported column type" << ltype;
